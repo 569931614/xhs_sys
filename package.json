@@ -1,0 +1,21 @@
+{
+  "scripts": {
+    "start": "cd src/service && pnpm start"
+  },
+  "devDependencies": {
+    "@stagewise/toolbar-vue": "^0.1.2",
+    "@types/qrcode": "^1.5.5"
+  },
+  "dependencies": {
+    "babel-polyfill": "^6.26.0",
+    "cheerio": "^1.0.0",
+    "express-xml-bodyparser": "^0.3.0",
+    "form-data": "^4.0.2",
+    "node-html-to-image": "^5.0.0",
+    "node-pptx": "^1.0.0",
+    "puppeteer": "^24.8.2",
+    "puppeteer-core": "^24.8.2",
+    "python-shell": "^5.0.0",
+    "qrcode": "^1.5.4"
+  }
+}

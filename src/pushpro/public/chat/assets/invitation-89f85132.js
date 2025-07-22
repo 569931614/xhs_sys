@@ -1,0 +1,1 @@
+import{g as t,p as n}from"./index-e8e306c5.js";function r(){return t({url:"/invitation/link"})}function s(){return t({url:"/invitation/list"})}function u(i){return n({url:"/auth/register",data:i})}export{r as a,s as b,u as f};

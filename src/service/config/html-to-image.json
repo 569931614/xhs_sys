@@ -1,0 +1,30 @@
+{
+  "wkhtmltopdfPaths": {
+    "win32": [
+      "E:\\AISoft\\wkhtmltopdf\\bin\\wkhtmltopdf.exe",
+      "E:\\AISoft\\wkhtmltopdf\\bin\\wkhtmltoimage.exe",
+      "F:\\AICode\\test_99ai\\src\\service\\node_modules\\wkhtmltopdf-installer\\bin\\wkhtmltopdf.exe",
+      "C:\\Program Files\\wkhtmltopdf\\bin\\wkhtmltopdf.exe",
+      "C:\\Program Files (x86)\\wkhtmltopdf\\bin\\wkhtmltopdf.exe"
+    ],
+    "linux": [
+      "/usr/bin/wkhtmltoimage",
+      "/usr/local/bin/wkhtmltoimage",
+      "/usr/bin/wkhtmltopdf",
+      "/usr/local/bin/wkhtmltopdf"
+    ],
+    "darwin": [
+      "/usr/local/bin/wkhtmltoimage",
+      "/opt/homebrew/bin/wkhtmltoimage",
+      "/usr/local/bin/wkhtmltopdf",
+      "/opt/homebrew/bin/wkhtmltopdf"
+    ]
+  },
+  "outputDirectory": "F:\\AICode\\test_99ai\\src\\service\\public\\images\\html_to_image",
+  "defaultOptions": {
+    "quality": 90,
+    "javascriptDelay": 1000,
+    "enableLocalFileAccess": true,
+    "enableJavascript": true
+  }
+}

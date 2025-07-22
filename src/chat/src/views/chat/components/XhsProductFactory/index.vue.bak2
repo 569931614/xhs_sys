@@ -1,0 +1,3039 @@
+<script setup lang="ts">
+import { useBasicLayout } from '@/hooks/useBasicLayout';
+import { useAppStore, useAuthStore, useAppCatStore } from '@/store';
+import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue';
+import { useRouter } from 'vue-router';
+import { generateProductAPI } from '@/api/xhsProductFactory';
+import { ProductForm, Task } from './types';
+
+// 导入组件
+import BrandProductInput from './components/BrandProductInput.vue';
+import TitleManager from './components/TitleManager.vue';
+import ActivityManager from './components/ActivityManager.vue';
+import FileUploader from './components/FileUploader.vue';
+import BatchSettings from './components/BatchSettings.vue';
+import TaskList from './components/TaskList.vue';
+import StatusNotification from './components/StatusNotification.vue';
+import ModalDialogs from './components/ModalDialogs.vue';
+import AiTopicGenModal from './components/AiTopicGenModal.vue';
+
+console.log('XhsProductFactory组件开始加载...');
+
+// Store
+const appStore = useAppStore();
+const authStore = useAuthStore();
+const isLogin = computed(() => authStore.isLogin);
+const { isMobile } = useBasicLayout();
+// 定义活动接口
+interface Activity {
+  id: string;
+  name: string;
+  type: string;
+  status: string;
+  isDefault: boolean;
+  totalNotes: number;
+  availableNotes: number;
+  publishedNotes: number;
+}
+
+// 定义上传文件接口
+interface UploadedFile {
+  id: string; // 文件唯一ID
+  fileId: string; // 从服务器返回的file_id
+  name: string; // 文件名
+  previewUrl: string; // 本地预览URL
+  size: number; // 文件大小
+  type: string; // 文件类型
+  status: 'uploading' | 'success' | 'error'; // 上传状态
+  error?: string; // 错误信息
+}
+
+// 定义任务接口
+interface Task {
+  id: string;
+  brandProduct: string;
+  title: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  createTime: string;
+  updateTime: string;
+  executeId?: string;
+  activityId?: string; // 添加活动ID字段
+  result?: any;
+  error?: string;
+  noteId?: string;
+  batchId?: string; // 添加批量任务相关字段
+  batchCount?: number; // 添加批量任务相关字段
+  batchIndex?: number; // 添加批量任务相关字段
+}
+
+const appStore = useAppStore();
+const authStore = useAuthStore();
+const isLogin = computed(() => authStore.isLogin);
+const { isMobile } = useBasicLayout();
+const router = useRouter();
+const appCatStore = useAppCatStore();
+
+// 页面标题
+document.title = '小红书产品工厂PRO版';
+
+// 表单数据
+const productForm = ref({
+  brandProduct: '',
+  title: '',
+  titles: [] as string[],  // 添加titles数组存储多个选题
+  activityId: '',
+  materials: [] as string[], // 存储文件ID列表
+  batchCount: '1' // 添加批量生成数量字段
+});
+
+// 手动跟踪titles（确保响应式）
+const titlesList = ref<string[]>([]);
+
+// 添加编辑状态变量
+const editingIndex = ref<number | null>(null);
+const editingValue = ref<string>('');
+
+// 状态消息
+const statusMessage = ref('');
+const statusType = ref<'success' | 'error' | 'info' | ''>('');
+
+// 二维码弹窗
+const showQrModal = ref(false);
+const currentQrUrl = ref('');
+const currentQrTask = ref<Task | null>(null);
+
+// 活动列表
+const activities = ref<Activity[]>([]);
+const loadingActivities = ref(false);
+
+// 添加活动弹窗状态
+const showAddActivityModal = ref(false);
+const newActivity = ref({
+  name: '',
+  type: 'normal',
+  status: 'active'
+});
+
+// 上传文件列表
+const uploadedFiles = ref<UploadedFile[]>([]);
+const uploadLoading = ref(false);
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const fileInputId = 'xhs-file-input-' + Date.now(); // 添加唯一ID
+
+// 任务列表
+const tasks = ref<Task[]>([]);
+const loadingTasks = ref(false);
+const submitting = ref(false);
+const autoRefreshInterval = ref<number | NodeJS.Timeout | null>(null);
+const pendingTasks = ref<string[]>([]);
+
+// 添加小红书笔记详情弹窗
+const showNoteDetailModal = ref(false);
+const currentNoteId = ref('');
+const noteDetailLoading = ref(false);
+const noteDetailError = ref('');
+
+// 添加显示页面状态
+const showMainPage = ref(true);
+const showNoteListPage = ref(false);
+
+// AI选题生成弹窗控制
+const showAiTopicGenModal = ref(false);
+
+// 处理AI生成的选题
+const handleAiGeneratedTopic = (topic: string) => {
+  if (topic && topic.trim() !== '') {
+    productForm.value.title = topic.trim();
+    // 自动添加到选题列表
+    addTitle();
+  }
+};
+
+// 处理AI生成的多个选题
+const handleAiGeneratedTopics = (topics: string[]) => {
+  if (topics && topics.length > 0) {
+    console.log('收到多个AI生成选题: ', topics);
+    
+    // 清空之前添加的选题，以便添加新选择的选题
+    // titlesList.value = [];
+    // productForm.value.titles = [];
+    
+    // 添加所有选择的选题
+    for (let i = 0; i < topics.length; i++) {
+      if (topics[i] && topics[i].trim()) {
+        productForm.value.title = topics[i].trim();
+        addTitle();
+      }
+    }
+    
+    // 清空当前选题框，准备用户可能的下一个输入
+    productForm.value.title = '';
+    
+    // 显示添加成功提示
+    showStatusMessage(`已添加 ${topics.length} 个选题`, 'success');
+  }
+};
+
+// 生成唯一ID的函数
+const generateRandomId = (prefix: string = '') => {
+  // 使用简短时间戳的最后6位 + 随机字符串，提高唯一性
+  const timestamp = Date.now().toString().slice(-6);
+  const randomStr = Math.random().toString(36).substring(2, 7);
+  return prefix ? `${prefix}_${timestamp}${randomStr}` : `${timestamp}${randomStr}`;
+};
+
+// 初始化默认活动类型
+const initDefaultActivity = () => {
+  // 检查是否已存在默认活动
+  const defaultExists = activities.value.some(activity => activity.isDefault);
+  
+  if (!defaultExists) {
+    activities.value.push({
+      id: generateRandomId('d'),
+      name: '日常使用',
+      type: 'normal',
+      status: 'active',
+      totalNotes: 0,
+      availableNotes: 0,
+      publishedNotes: 0,
+      isDefault: true
+    });
+  }
+};
+
+// 处理API错误
+function handleApiError(error: any) {
+  console.error('API请求失败:', error);
+  
+  // 判断是否为认证错误
+  if (error?.response?.status === 401 || 
+      error?.message?.includes('401') || 
+      error?.message?.includes('认证') || 
+      error?.message?.includes('登录')) {
+    authStore.removeToken();
+    authStore.setLoginDialog(true);
+  }
+}
+
+// 获取活动列表
+async function fetchUserActivities() {
+  console.log('fetchUserActivities被调用');
+  loadingActivities.value = true;
+  try {
+    console.log('正在请求活动列表API...');
+    const response = await fetchXhsActivitiesStatsAPI();
+    console.log('活动列表API响应:', response);
+    
+    // 检查是否有 data 属性并处理数据
+    if (response?.data) {
+      // 处理 API 返回数据
+      const activitiesData = Array.isArray(response.data) ? response.data : [response.data];
+      
+      // 更新活动列表
+      activities.value = activitiesData.map(activity => ({
+        id: activity.id || generateRandomId('a'),
+        name: activity.name,
+        type: activity.type,
+        status: activity.status,
+        isDefault: activity.isDefault,
+        totalNotes: activity.totalNotes || 0,
+        availableNotes: activity.availableNotes || 0,
+        publishedNotes: activity.publishedNotes || 0
+      }));
+      
+      console.log('活动列表更新完成:', activities.value);
+      
+      // 如果有活动数据，默认选择第一个活动
+      if (activities.value.length > 0 && !productForm.value.activityId) {
+        productForm.value.activityId = activities.value[0].id;
+      }
+      
+      // 如果没有活动，则初始化默认活动
+      if (activities.value.length === 0) {
+        initDefaultActivity();
+      }
+    } else if (Array.isArray(response)) {
+      // 直接是数组的情况
+      activities.value = response.map(activity => ({
+        id: activity.id || generateRandomId('a'),
+        name: activity.name,
+        type: activity.type,
+        status: activity.status,
+        isDefault: activity.isDefault,
+        totalNotes: activity.totalNotes || 0,
+        availableNotes: activity.availableNotes || 0,
+        publishedNotes: activity.publishedNotes || 0
+      }));
+      
+      // 如果有活动数据，默认选择第一个活动
+      if (activities.value.length > 0 && !productForm.value.activityId) {
+        productForm.value.activityId = activities.value[0].id;
+      }
+      
+      // 如果没有活动，则初始化默认活动
+      if (activities.value.length === 0) {
+        initDefaultActivity();
+      }
+    } else {
+      // 如果没有返回数据，则初始化默认活动
+      console.log('活动列表响应为空，使用默认活动');
+      activities.value = [];
+      initDefaultActivity();
+    }
+  } catch (error: any) {
+    console.error('获取活动列表失败:', error);
+    console.error('错误详情:', error.message, error.stack);
+    handleApiError(error);
+    // 确保有默认活动
+    activities.value = [];
+    initDefaultActivity();
+  } finally {
+    loadingActivities.value = false;
+    console.log('fetchUserActivities执行完成');
+  }
+}
+
+// 获取用户任务列表
+async function fetchUserTasks() {
+  console.log('fetchUserTasks被调用');
+  loadingTasks.value = true;
+  try {
+    console.log('开始获取任务列表...');
+    
+    // 显示加载中状态
+    showStatusMessage('正在加载任务列表...', 'info');
+    
+    console.log('发送获取任务列表请求...');
+    const response = await getUserTasksAPI();
+    console.log('任务列表API响应:', JSON.stringify(response));
+    
+    // 检查响应数据
+    let tasksData: any[] = [];
+    
+    // 处理不同的响应格式情况
+    if (response && typeof response === 'object' && 'data' in response && Array.isArray(response.data)) {
+      // 有data字段且是数组
+      console.log('响应中包含data数组字段');
+      tasksData = response.data;
+    } else if (Array.isArray(response)) {
+      // 直接是数组
+      console.log('响应直接是数组');
+      tasksData = response;
+    } else if (response && typeof response === 'object' && 'data' in response) {
+      // 有data字段但不是数组
+      console.warn('任务列表响应格式不是数组:', JSON.stringify((response as any).data));
+      tasksData = [];
+    } else {
+      // 没有可用数据
+      console.warn('未获取到任务列表数据, 响应:', JSON.stringify(response));
+      tasksData = [];
+    }
+    
+    if (tasksData && tasksData.length > 0) {
+      console.log('处理前的任务数据数量:', tasksData.length);
+      console.log('处理前的第一个任务数据:', JSON.stringify(tasksData[0]));
+      
+      // 先停止现有的自动刷新
+      stopAutoRefresh();
+      
+      // 先对任务进行分组和排序
+      const sortedTasks = (() => {
+        // 处理每个任务，确保日期字段格式统一
+        const processedTasks = tasksData.map((task: any) => {
+          const createTime = task.created_at || task.createTime || new Date().toISOString();
+          return {
+            ...task,
+            normalizedCreateTime: new Date(createTime).getTime()
+          };
+        });
+
+        // 按批次ID分组，主要是为了保持批次内的顺序
+        const batchGroups: Record<string, any[]> = {};
+        const singleTasks: any[] = [];
+
+        processedTasks.forEach((task: any) => {
+          if (task.batchId) {
+            if (!batchGroups[task.batchId]) {
+              batchGroups[task.batchId] = [];
+            }
+            batchGroups[task.batchId].push(task);
+          } else {
+            singleTasks.push(task);
+          }
+        });
+
+        // 对每个批次内的任务按batchIndex排序
+        Object.keys(batchGroups).forEach(batchId => {
+          batchGroups[batchId].sort((a: any, b: any) => (a.batchIndex || 1) - (b.batchIndex || 1));
+        });
+
+        // 合并所有任务
+        let allTasks: any[] = [];
+        
+        // 添加批次任务，每个批次作为一个整体
+        Object.keys(batchGroups).forEach(batchId => {
+          allTasks = allTasks.concat(batchGroups[batchId]);
+        });
+        
+        // 添加单个任务
+        allTasks = allTasks.concat(singleTasks);
+        
+        // 按创建时间排序所有任务（新的在前）
+        allTasks.sort((a: any, b: any) => {
+          return b.normalizedCreateTime - a.normalizedCreateTime;
+        });
+        
+        return allTasks;
+      })();
+
+      // 映射任务数据
+      tasks.value = sortedTasks.map((task: any) => {
+        // 获取规范化的任务状态
+        let normalizedStatus: 'pending' | 'running' | 'completed' | 'failed' = 'pending';
+        const rawStatus = task.status?.toLowerCase() || '';
+        
+        if (rawStatus === 'pending' || rawStatus === 'waiting') {
+          normalizedStatus = 'pending';
+        } else if (rawStatus === 'running' || rawStatus === 'processing') {
+          normalizedStatus = 'running';
+        } else if (rawStatus === 'completed' || rawStatus === 'succeeded' || rawStatus === 'success') {
+          normalizedStatus = 'completed';
+        } else if (rawStatus === 'failed' || rawStatus === 'error') {
+          normalizedStatus = 'failed';
+        }
+        
+        // 映射到任务对象，确保所有必要字段都存在
+        const mappedTask = {
+          id: task.id || generateRandomId('task'),
+          brandProduct: task.brandProduct || task.brand_product || '未命名产品',
+          title: task.title || '未命名任务',
+          status: normalizedStatus,
+          createTime: task.created_at || task.createTime || new Date().toISOString(),
+          updateTime: task.updated_at || task.updateTime || task.created_at || new Date().toISOString(),
+          executeId: task.executeId || task.execute_id,
+          activityId: task.activityId || task.activity_id,
+          noteId: task.noteId || task.note_id,
+          result: task.result || null,
+          error: task.error || null,
+          // 添加批量任务相关字段
+          batchId: task.batchId || task.batch_id,
+          batchCount: task.batchCount || task.batch_count || 1,
+          batchIndex: task.batchIndex || task.batch_index || 1
+        };
+        
+        return mappedTask;
+      });
+      
+      console.log('处理后的任务列表数量:', tasks.value.length);
+      
+      // 清空并重建待处理任务列表
+      pendingTasks.value = [];
+      
+      // 只将真正处于pending或running状态的任务添加到待处理列表
+      const pendingTasksList = tasks.value
+        .filter(task => task.status === 'pending' || task.status === 'running')
+        .map(task => task.id);
+        
+      // 更新待处理任务列表
+      pendingTasks.value = pendingTasksList;
+      
+      console.log('新的待处理任务数量:', pendingTasks.value.length);
+      console.log('待处理任务IDs:', pendingTasks.value);
+      
+      // 如果有待处理的任务，启动自动刷新
+      if (pendingTasks.value.length > 0) {
+        console.log('启动自动刷新...');
+        startAutoRefresh();
+      } else {
+        console.log('没有待处理任务，不启动自动刷新');
+      }
+    } else {
+      console.log('任务列表为空');
+      tasks.value = [];
+      pendingTasks.value = [];
+      stopAutoRefresh();
+    }
+  } catch (error: any) {
+    console.error('获取任务列表失败:', error);
+    console.error('错误详情:', error.message, error.stack);
+    handleApiError(error);
+    
+    // 显示加载失败消息，并提供重试选项
+    showStatusMessage('任务列表加载失败，请点击右上角"刷新列表"按钮重试', 'error');
+  } finally {
+    loadingTasks.value = false;
+    
+    // 如果任务加载成功且任务列表不为空，显示成功消息
+    if (tasks.value.length > 0) {
+      showStatusMessage(`成功加载 ${tasks.value.length} 个任务`, 'success');
+    } else if (tasks.value.length === 0) {
+      // 如果任务列表为空，显示提示消息
+      showStatusMessage('暂无任务，请先创建任务', 'info');
+    }
+  }
+}
+
+// 刷新任务状态
+async function refreshTaskStatus(taskId: string) {
+  if (!taskId) return;
+  
+  try {
+    console.log(`开始刷新任务状态 [${taskId}]...`);
+    const response = await getTaskResultAPI(taskId);
+    console.log(`获取任务状态响应:`, response);
+    
+    if (response) {
+      // 在任务列表中查找并更新该任务
+      const index = tasks.value.findIndex(task => task.id === taskId);
+      if (index !== -1) {
+        // 记录原始状态用于比较
+        const originalStatus = tasks.value[index].status;
+        const task = tasks.value[index];
+        
+        // 确保状态类型符合定义，直接使用API返回的状态，不再进行复杂处理
+        let status: 'pending' | 'running' | 'completed' | 'failed' = tasks.value[index].status;
+        
+        // 直接使用API处理后的状态
+        if (response.status) {
+          // 明确记录接口返回的任务状态
+          console.log(`接口返回任务[${taskId}]的状态为: ${response.status}`);
+          
+          // 直接使用响应中的状态，API层已经进行了标准化处理
+          if (response.status === 'pending' || response.status === 'running' || 
+              response.status === 'completed' || response.status === 'failed') {
+            status = response.status;
+          }
+        }
+        
+        // 确保从嵌套数据中提取状态
+        if (response.data && typeof response.data === 'object' && response.data.status) {
+          console.log(`响应中data对象内的状态: ${response.data.status}`);
+          if (['pending', 'running', 'completed', 'failed'].includes(response.data.status)) {
+            status = response.data.status as 'pending' | 'running' | 'completed' | 'failed';
+            console.log(`从响应数据中提取任务状态: ${status}`);
+          }
+        }
+        
+        // 针对您提供的特定响应格式，检查嵌套结构
+        if (response.data && typeof response.data === 'object' && 
+            response.data.data && typeof response.data.data === 'object' && 
+            response.data.data.status) {
+          console.log(`深度嵌套的状态: ${response.data.data.status}`);
+          if (['pending', 'running', 'completed', 'failed'].includes(response.data.data.status)) {
+            status = response.data.data.status as 'pending' | 'running' | 'completed' | 'failed';
+            console.log(`从深度嵌套数据中提取任务状态: ${status}`);
+          }
+        }
+        
+        console.log(`任务[${taskId}]状态更新: ${originalStatus} -> ${status}`);
+        
+        // 提取noteId（如果有的话）
+        let noteId = null;
+        if (response.data && typeof response.data === 'object') {
+          noteId = response.data.noteId || null;
+        }
+        
+        // 提取错误信息
+        let errorMessage = '';
+        if (status === 'failed') {
+          // 优先使用API返回的错误信息
+          errorMessage = response.error || '';
+          
+          // 如果在data中有更详细的错误信息
+          if (response.data && typeof response.data === 'object') {
+            errorMessage = response.data.error || errorMessage;
+          }
+          
+          // 如果仍没有找到错误信息
+          if (!errorMessage) {
+            errorMessage = '工作流执行失败';
+          }
+          
+          console.log(`任务[${taskId}]失败，错误信息: ${errorMessage}`);
+        }
+        
+        const updatedTask: Task = {
+          ...tasks.value[index],
+          status,
+          noteId: noteId || tasks.value[index].noteId,
+          result: response.data || tasks.value[index].result,
+          error: status === 'failed' ? errorMessage : tasks.value[index].error
+        };
+        
+        tasks.value.splice(index, 1, updatedTask);
+        
+        // 如果任务已完成或失败，从待处理任务列表中移除
+        if (status === 'completed' || status === 'failed') {
+          const pendingIndex = pendingTasks.value.indexOf(taskId);
+          if (pendingIndex !== -1) {
+            console.log(`任务完成或失败，从待处理列表移除: ${taskId}`);
+            pendingTasks.value.splice(pendingIndex, 1);
+            
+            // 检查是否需要停止自动刷新
+            if (pendingTasks.value.length === 0) {
+              console.log('没有待处理任务，停止自动刷新');
+              stopAutoRefresh();
+            }
+            
+            // 如果是批量任务且已完成，检查是否需要显示批量提示
+            if (status === 'completed' && task.batchId && (task.batchCount || 0) > 1) {
+              // 查找同批次的其他任务
+              const batchTasks = tasks.value.filter(t => t.batchId === task.batchId);
+              const completedCount = batchTasks.filter(t => t.status === 'completed').length;
+              
+              if (completedCount === task.batchCount) {
+                // 批量任务全部完成
+                showStatusMessage(`批量生成全部完成：${completedCount}/${task.batchCount} 篇笔记已生成`, 'success');
+              } else {
+                // 部分完成
+                showStatusMessage(`批量生成进度：${completedCount}/${task.batchCount} 篇笔记已完成`, 'info');
+              }
+            }
+          }
+          
+          // 显示状态更新消息
+          if (status === 'completed' && originalStatus !== 'completed') {
+            if ((task.batchCount || 0) > 1) {
+              showStatusMessage(`批量任务 "${updatedTask.title}" 已完成 (${task.batchIndex}/${task.batchCount})`, 'success');
+            } else {
+              showStatusMessage(`任务 "${updatedTask.title}" 已完成，可以查看笔记详情了`, 'success');
+            }
+          } else if (status === 'failed' && originalStatus !== 'failed') {
+            if ((task.batchCount || 0) > 1) {
+              showStatusMessage(`批量任务 "${updatedTask.title}" 执行失败 (${task.batchIndex}/${task.batchCount}): ${errorMessage || '工作流执行失败'}`, 'error');
+            } else {
+              showStatusMessage(`任务 "${updatedTask.title}" 执行失败: ${errorMessage || '工作流执行失败'}`, 'error');
+            }
+          }
+        } else if (status === 'running' && originalStatus === 'pending') {
+          // 从pending变为running时也通知用户
+          if ((task.batchCount || 0) > 1) {
+            showStatusMessage(`批量任务 "${updatedTask.title}" 开始处理 (${task.batchIndex}/${task.batchCount})`, 'info');
+          } else {
+            showStatusMessage(`任务 "${updatedTask.title}" 开始处理`, 'info');
+          }
+        }
+      }
+    } else {
+      console.warn(`刷新任务状态失败: 任务 ${taskId} 响应为空`);
+    }
+  } catch (error: any) {
+    console.error(`刷新任务状态异常:`, error);
+    handleApiError(error);
+  }
+}
+
+// 自动刷新待处理任务状态
+function startAutoRefresh() {
+  // 清除之前的定时器
+  if (autoRefreshInterval.value) {
+    console.log('清除现有的自动刷新定时器');
+    clearInterval(autoRefreshInterval.value);
+  }
+  
+  console.log(`设置自动刷新定时器, 当前待处理任务: ${pendingTasks.value.length}`);
+  
+  // 给用户显示正在自动刷新的提示
+  showStatusMessage('任务正在自动刷新中...', 'info');
+  
+  // 设置10秒一次的自动刷新
+  autoRefreshInterval.value = window.setInterval(() => {
+    // 如果没有待处理的任务，停止自动刷新
+    if (pendingTasks.value.length === 0) {
+      console.log('没有待处理任务，停止自动刷新定时器');
+      stopAutoRefresh();
+      return;
+    }
+    
+    console.log(`执行自动刷新, 待处理任务数: ${pendingTasks.value.length}`);
+    
+    // 创建任务ID的副本进行迭代，防止在循环中修改原数组
+    const taskIdsToRefresh = [...pendingTasks.value];
+    
+    // 使用批量API一次性获取所有任务状态，而不是逐个请求
+    batchRefreshTaskStatus(taskIdsToRefresh).then((updatedTasks: any[]) => {
+      console.log(`批量刷新成功，获取到 ${updatedTasks.length} 个任务的状态`);
+      
+      // 更新任务状态
+      if (updatedTasks && updatedTasks.length > 0) {
+        updatedTasks.forEach((updatedTask: any) => {
+          updateTaskInList(updatedTask);
+        });
+      }
+    }).catch((error: any) => {
+      console.error('批量刷新任务状态失败:', error);
+      // 如果批量API失败，回退到逐个刷新
+      taskIdsToRefresh.forEach(taskId => {
+        refreshTaskStatus(taskId);
+      });
+    });
+  }, 10000);
+  
+  console.log('自动刷新定时器已设置');
+}
+
+// 批量刷新任务状态
+async function batchRefreshTaskStatus(taskIds: string[]): Promise<any[]> {
+  if (!taskIds || taskIds.length === 0) {
+    console.warn('批量刷新任务状态: 没有提供任务ID');
+    return Promise.resolve([]);
+  }
+  
+  console.log(`批量刷新 ${taskIds.length} 个任务的状态`);
+  try {
+    // 使用批量API获取任务状态
+    const response = await batchGetTaskResultsAPI(taskIds);
+    console.log('批量刷新任务状态响应:', response);
+    
+    if (response && response.results && Array.isArray(response.results)) {
+      return response.results;
+    } else if (Array.isArray(response)) {
+      return response;
+    }
+    
+    console.warn('批量刷新任务状态: 响应格式不符合预期');
+    return [];
+  } catch (error: any) {
+    console.error('批量刷新任务状态失败:', error);
+    return [];
+  }
+}
+
+// 停止自动刷新
+function stopAutoRefresh() {
+  if (autoRefreshInterval.value) {
+    console.log('停止自动刷新定时器');
+    clearInterval(autoRefreshInterval.value);
+    autoRefreshInterval.value = null;
+    
+    // 如果有已完成的任务，提示用户
+    const completedTasks = tasks.value.filter(task => task.status === 'completed');
+    if (completedTasks.length > 0) {
+      showStatusMessage('所有任务处理完毕，可以查看结果', 'success');
+    }
+  }
+}
+
+// 查看任务结果
+function handleViewQrCode(task: Task) {
+  console.log('查看笔记二维码：', task);
+  if (!task) {
+    showStatusMessage('任务数据为空', 'error');
+    return;
+  }
+
+  // 记录原始任务数据
+  console.log('原始任务数据：', task);
+  
+  // 尝试提取分享链接
+  let shareLink = '';
+  
+  // 1. 直接使用task.result
+  if (task.result) {
+    shareLink = task.result;
+    console.log(`直接使用result作为分享链接: ${shareLink}`);
+  }
+  
+  // 如果没有获取到分享链接，显示错误信息
+  if (!shareLink) {
+    showStatusMessage('无法获取分享链接', 'error');
+    return;
+  }
+  
+  console.log('最终分享链接：', shareLink);
+
+  // 构建二维码URL
+  currentQrUrl.value = `https://xhs.aivip1.top/api/html-render/qrcode?size=200x200&data=${encodeURIComponent(shareLink)}`;
+  currentQrTask.value = task;
+  showQrModal.value = true;
+}
+
+// 关闭二维码弹窗
+function closeQrModal() {
+  showQrModal.value = false;
+  currentQrUrl.value = '';
+  currentQrTask.value = null;
+}
+
+// 查看小红书笔记详情
+function handleViewNoteDetail(task: Task | string | any) {
+  console.log('查看笔记详情，参数：', task);
+  
+  let noteUrl = '';
+  
+  // 处理不同类型的参数
+  if (typeof task === 'string') {
+    // 直接使用字符串作为URL
+    noteUrl = task;
+  } else if (task && typeof task === 'object') {
+    // 如果是任务对象，尝试提取URL
+    if (task.result) {
+      if (task.result.data) { 
+        noteUrl = task.result.data;
+      } else {
+        noteUrl = task.result;
+      }
+    } else if (task.data && typeof task.data === 'string') {
+      // 兼容嵌套data字段中的URL
+      noteUrl = task.data;
+    }
+  }
+  
+  if (!noteUrl) {
+    showStatusMessage('笔记链接不存在', 'error');
+    return;
+  }
+  
+  console.log('最终笔记详情URL：', noteUrl);
+  
+  // 重置错误状态
+  noteDetailError.value = '';
+  // 设置加载状态
+  noteDetailLoading.value = true;
+  
+  // 设置URL和显示弹窗
+  currentNoteId.value = noteUrl;
+  showNoteDetailModal.value = true;
+  
+  // 为iframe加载添加超时处理，如果15秒后仍未加载完成，提示可能出现问题
+  setTimeout(() => {
+    if (noteDetailLoading.value) {
+      noteDetailLoading.value = false;
+      noteDetailError.value = '加载时间过长，请检查网络连接或刷新重试';
+    }
+  }, 15000);
+}
+
+// 关闭小红书笔记详情弹窗
+function closeNoteDetailModal() {
+  showNoteDetailModal.value = false;
+  currentNoteId.value = '';
+  noteDetailLoading.value = false;
+  noteDetailError.value = '';
+}
+
+// iframe加载完成的处理函数
+function handleIframeLoaded() {
+  noteDetailLoading.value = false;
+}
+
+// iframe加载失败的处理函数
+function handleIframeError() {
+  noteDetailLoading.value = false;
+  noteDetailError.value = '笔记详情加载失败，请稍后重试';
+}
+
+// 查看活动笔记列表 - 模拟小红书应用内跳转效果
+function handleViewActivity(activityId: string) {
+  if (!activityId) {
+    showStatusMessage('活动ID不存在', 'error');
+    return;
+  }
+  
+  console.log('导航到活动页面, activityId:', activityId);
+  
+  // 使用appCatStore.showApp而不是router.push
+  appCatStore.showApp({
+    id: 'xhs-notes',
+    name: '小红书笔记',
+    type: 'built-in',
+    path: 'xhs-notes',
+    params: { activityId }
+  });
+  
+  // 保存当前活动ID到localStorage，以便在笔记组件中使用
+  localStorage.setItem('currentActivityId', activityId);
+  
+  // 显示成功消息
+  showStatusMessage('正在跳转到活动笔记列表...', 'success');
+}
+
+// 返回主页面
+function backToMainPage() {
+  showNoteListPage.value = false;
+  showMainPage.value = true;
+}
+
+// 添加一个状态标记，确保API只被调用一次
+const hasInitialized = ref(false);
+
+// 在onMounted之外单独监听组件状态，确保API请求在组件完全加载后执行
+watch(
+  () => showMainPage.value,
+  (newVal) => {
+    if (newVal && !hasInitialized.value) {
+      console.log('监听到showMainPage变为true，开始加载数据');
+      hasInitialized.value = true;
+      try {
+        fetchUserActivities();
+        fetchUserTasks();
+        console.log('初始化API调用已完成');
+      } catch (error) {
+        console.error('初始化API调用失败:', error);
+      }
+    }
+  },
+  { immediate: true }
+);
+
+// 页面加载时获取活动列表和任务列表
+onMounted(() => {
+  console.log('XhsProductFactory组件已挂载，开始获取数据...');
+  // 确保组件已初始化
+  if (!hasInitialized.value) {
+    hasInitialized.value = true;
+    try {
+      console.log('准备调用fetchUserActivities...');
+      fetchUserActivities();
+      console.log('准备调用fetchUserTasks...');
+      fetchUserTasks();
+      console.log('onMounted中的API调用已完成');
+    } catch (error) {
+      console.error('onMounted中发生错误:', error);
+    }
+  }
+});
+
+// 计算文件数量和限制
+const fileCount = computed(() => uploadedFiles.value.length);
+const maxFileCount = 10;
+
+// 上传文件处理
+async function handleFileUpload(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = input.files;
+  
+  // 无论上传成功与否，都重置锁定状态
+  isFileDialogOpen.value = false;
+  
+  if (!files || files.length === 0) {
+    console.log('没有选择文件');
+    return;
+  }
+  
+  console.log(`选择了 ${files.length} 个文件`);
+  
+  const currentCount = fileCount.value;
+  const remainingSlots = maxFileCount - currentCount;
+  
+  if (files.length > remainingSlots) {
+    console.warn(`最多只能上传${maxFileCount}个文件，当前还可上传${remainingSlots}个`);
+    showStatusMessage(`最多只能上传${maxFileCount}个文件，当前还可上传${remainingSlots}个`, 'error');
+  }
+  
+  // 处理文件上传
+  const newFiles = Array.from(files).slice(0, remainingSlots);
+  
+  if (newFiles.length === 0) {
+    return;
+  }
+  
+  console.log(`开始上传 ${newFiles.length} 个文件`);
+  uploadLoading.value = true;
+  
+  for (const file of newFiles) {
+    // 创建本地文件预览
+    const fileId = generateRandomId('file');
+    const reader = new FileReader();
+    
+    // 添加到上传列表
+    const uploadFile: UploadedFile = {
+      id: fileId,
+      fileId: '',
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      previewUrl: '',
+      status: 'uploading'
+    };
+    
+    uploadedFiles.value.push(uploadFile);
+    
+    // 读取文件为DataURL，用于本地预览
+    reader.onload = (e) => {
+      const fileIndex = uploadedFiles.value.findIndex(f => f.id === fileId);
+      if (fileIndex !== -1) {
+        uploadedFiles.value[fileIndex].previewUrl = e.target?.result as string;
+      }
+    };
+    reader.readAsDataURL(file);
+    
+    // 上传文件到服务器
+    try {
+      console.log(`上传文件: ${file.name}, 大小: ${file.size} 字节`);
+      const fileId = await uploadFileAPI(file);
+      console.log(`文件上传成功，获取到fileId: ${fileId}`);
+      
+      // 更新文件状态
+      const fileIndex = uploadedFiles.value.findIndex(f => f.id === uploadFile.id);
+      if (fileIndex !== -1) {
+        uploadedFiles.value[fileIndex].fileId = fileId;
+        uploadedFiles.value[fileIndex].status = 'success';
+        
+        // 添加到表单的materials数组
+        productForm.value.materials.push(fileId);
+      }
+    } catch (error: any) {
+      console.error(`上传文件 ${file.name} 失败:`, error);
+      handleApiError(error);
+      
+      const fileIndex = uploadedFiles.value.findIndex(f => f.id === uploadFile.id);
+      if (fileIndex !== -1) {
+        uploadedFiles.value[fileIndex].status = 'error';
+        uploadedFiles.value[fileIndex].error = error.message || '上传失败';
+      }
+    }
+  }
+  
+  uploadLoading.value = false;
+  
+  // 重置文件输入框，以便可以重复上传相同的文件
+  if (fileInputRef.value) {
+    fileInputRef.value.value = '';
+  }
+}
+
+// 删除上传的文件
+function deleteFile(fileId: string) {
+  const fileIndex = uploadedFiles.value.findIndex(file => file.id === fileId);
+  
+  if (fileIndex !== -1) {
+    // 获取文件的fileId
+    const serverFileId = uploadedFiles.value[fileIndex].fileId;
+    
+    // 从上传列表中删除
+    uploadedFiles.value.splice(fileIndex, 1);
+    
+    // 如果已经上传成功，从材料列表中移除
+    if (serverFileId) {
+      const materialIndex = productForm.value.materials.indexOf(serverFileId);
+      if (materialIndex !== -1) {
+        productForm.value.materials.splice(materialIndex, 1);
+      }
+    }
+  }
+}
+
+// 添加点击锁定状态，防止重复触发
+const isFileDialogOpen = ref(false);
+
+// 触发文件上传
+function triggerFileUpload(event: Event) {
+  // 如果对话框已经打开，防止重复触发
+  if (isFileDialogOpen.value) {
+    console.log('文件选择对话框已打开，忽略重复点击');
+    return;
+  }
+  
+  // 设置锁定状态
+  isFileDialogOpen.value = true;
+  
+  // 阻止事件冒泡，防止与外层点击冲突
+  event?.preventDefault();
+  event?.stopPropagation();
+  
+  console.log('触发文件上传');
+  
+  // 方法1: 通过ref引用获取
+  let fileInput = fileInputRef.value;
+  
+  // 方法2: 如果ref引用为空，尝试通过ID查找
+  if (!fileInput) {
+    console.log('通过ref未找到文件输入元素，尝试通过ID查找');
+    fileInput = document.getElementById(fileInputId) as HTMLInputElement;
+  }
+  
+  // 方法3: 如果方法1和方法2都失败，尝试创建一个临时输入元素
+  if (!fileInput) {
+    console.log('通过ref和ID均未找到文件输入元素，创建临时元素');
+    fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.multiple = true;
+    fileInput.accept = 'image/*';
+    fileInput.style.display = 'none';
+    fileInput.onchange = (e) => {
+      handleFileUpload(e);
+      // 重置锁定状态
+      isFileDialogOpen.value = false;
+    };
+    document.body.appendChild(fileInput);
+    
+    // 使用后移除临时元素
+    setTimeout(() => {
+      if (fileInput && document.body.contains(fileInput)) {
+        document.body.removeChild(fileInput);
+      }
+      // 重置锁定状态
+      isFileDialogOpen.value = false;
+    }, 5000);
+  }
+  
+  if (fileInput) {
+    // 确保通过原生DOM API调用click
+    console.log('找到文件输入元素，触发点击');
+    // 使用nextTick确保DOM更新后再触发点击
+    nextTick(() => {
+      fileInput.click();
+      console.log('已触发文件选择对话框');
+      
+      // 添加对话框关闭时的处理
+      window.addEventListener('focus', function onFocus() {
+        // 使用短延时确保文件选择后再重置锁定状态
+        setTimeout(() => {
+          isFileDialogOpen.value = false;
+          window.removeEventListener('focus', onFocus);
+        }, 300);
+      }, { once: true });
+    });
+  } else {
+    console.error('无法找到或创建文件输入元素');
+    showStatusMessage('无法打开文件选择器，请刷新页面后重试', 'error');
+    // 重置锁定状态
+    isFileDialogOpen.value = false;
+  }
+}
+
+// 清空表单
+function resetForm() {
+  productForm.value = {
+    brandProduct: '',
+    title: '',
+    titles: [], // 清空选题列表
+    activityId: activities.value.length > 0 ? activities.value[0].id : '',
+    materials: [],
+    batchCount: '1' // 重置批量生成数量
+  };
+  
+  // 重置titlesList
+  titlesList.value = [];
+  
+  // 清空上传的文件
+  uploadedFiles.value = [];
+}
+
+// 显示状态消息
+function showStatusMessage(message: string, type: 'success' | 'error' | 'info') {
+  // 如果当前已有消息，先清除
+  if (statusMessage.value) {
+    statusMessage.value = '';
+    statusType.value = '';
+    
+    // 短暂延迟后显示新消息，确保动画效果能够重新触发
+    setTimeout(() => {
+  statusMessage.value = message;
+  statusType.value = type;
+    }, 100);
+  } else {
+    statusMessage.value = message;
+    statusType.value = type;
+  }
+  
+  // 根据状态类型决定显示时间：错误消息显示更长时间
+  const displayTime = type === 'error' ? 8000 : 5000;
+  
+  // 自动清除消息
+  setTimeout(() => {
+    // 只有当当前显示的消息与设置的消息相同时才清除
+    if (statusMessage.value === message) {
+    statusMessage.value = '';
+    statusType.value = '';
+    }
+  }, displayTime);
+}
+
+// 提交表单
+async function submitForm() {
+  // 清除之前的状态消息
+  statusMessage.value = '';
+  statusType.value = '';
+  
+  if (!productForm.value.brandProduct) {
+    console.warn('请输入品牌+产品');
+    showStatusMessage('请输入品牌+产品', 'error');
+    return;
+  }
+  
+  // 验证选题：单选题模式或多选题模式
+  const hasMultiTitles = titlesList.value.length > 0;
+  const hasSingleTitle = !!productForm.value.title.trim();
+  
+  if (!hasMultiTitles && !hasSingleTitle) {
+    console.warn('请输入至少一个选题');
+    showStatusMessage('请输入至少一个选题', 'error');
+    return;
+  }
+  
+  if (!productForm.value.activityId) {
+    console.warn('请选择活动');
+    showStatusMessage('请选择活动', 'error');
+    return;
+  }
+  
+  if (productForm.value.materials.length === 0) {
+    console.warn('请上传素材图');
+    showStatusMessage('请上传素材图', 'error');
+    return;
+  }
+  
+  // 检查批量生成数量是否合法
+  const batchCount = Number(productForm.value.batchCount);
+  if (isNaN(batchCount) || batchCount < 1 || batchCount > 10) {
+    console.warn('批量生成数量必须在1-10之间');
+    showStatusMessage('批量生成数量必须在1-10之间', 'error');
+    return;
+  }
+  
+  // 检查是否有文件正在上传
+  const isUploading = uploadedFiles.value.some(file => file.status === 'uploading');
+  if (isUploading) {
+    console.warn('请等待所有文件上传完成');
+    showStatusMessage('请等待所有文件上传完成', 'info');
+    return;
+  }
+  
+  // 检查是否有文件上传失败
+  const hasError = uploadedFiles.value.some(file => file.status === 'error');
+  if (hasError) {
+    console.warn('有文件上传失败，请删除后重新上传');
+    showStatusMessage('有文件上传失败，请删除后重新上传', 'error');
+    return;
+  }
+  
+  // 提交表单数据
+  try {
+    submitting.value = true;
+    
+    // 准备选题列表：多选题模式或单选题模式
+    let titleList: string[] = [];
+    if (hasMultiTitles) {
+      titleList = [...titlesList.value];
+    } else {
+      titleList = [productForm.value.title.trim()];
+    }
+    
+    // 如果选题数量比要生成的笔记数多，不需要处理
+    // 如果选题数量比要生成的笔记数少，则循环使用选题
+    while (titleList.length < batchCount) {
+      // 循环使用选题，直到达到批量生成所需数量
+      titleList = [...titleList, ...titlesList.value.length > 0 ? 
+        titlesList.value : [productForm.value.title.trim()]];
+    }
+    
+    // 截取需要的选题数量
+    titleList = titleList.slice(0, batchCount);
+    
+    console.log(`准备生成${batchCount}篇笔记，使用${titleList.length}个选题`);
+    console.log('使用的选题列表:', titleList);
+    
+    // 显示包含批量信息的提交提示
+    const submitMessage = batchCount > 1 
+      ? `正在提交请求，将批量生成 ${batchCount} 篇笔记...` 
+      : '正在提交请求...';
+    showStatusMessage(submitMessage, 'info');
+    
+    const data = {
+      brandProduct: productForm.value.brandProduct,
+      title: titleList[0], // 使用第一个选题作为主选题
+      titleList: titleList, // 传递完整选题列表
+      activityId: productForm.value.activityId,
+      fileIds: productForm.value.materials,
+      batchCount: batchCount
+    };
+    
+    console.log('准备提交的数据:', JSON.stringify(data));
+    
+    // 调用接口生成产品
+    const response = await generateProductAPI(data);
+    console.log('提交响应:', JSON.stringify(response));
+    
+    // 检查嵌套的success字段
+    if (response && response.data && response.data.success === false) {
+      // 显示错误消息（API返回成功但内部响应失败的情况）
+      console.error(`提交失败: ${response.data.message || '未知错误'}`, response.data);
+      showStatusMessage(`${response.data.message || '生成失败，请稍后重试'}`, 'error');
+      submitting.value = false;
+      return;
+    }
+    
+    if (response && response.success) {
+      // 显示成功消息，包含批量信息
+      console.log('提交成功, 响应数据:', JSON.stringify(response.data));
+      const successMessage = batchCount > 1 
+        ? `提交成功，正在批量生成 ${batchCount} 篇笔记，请在下方查看结果，生成可能需要几分钟` 
+        : '提交成功，任务正在生成中，请在下方查看结果';
+      showStatusMessage(successMessage, 'success');
+      
+      // 刷新用户积分信息
+      try {
+        console.log('正在刷新用户积分信息...');
+        // 调用刷新用户信息的方法
+        await authStore.getUserInfo();
+        console.log('用户积分信息已更新');
+      } catch (refreshError) {
+        console.error('刷新用户积分失败:', refreshError);
+      }
+      
+      // 不再自动重置表单，保留用户输入的数据
+      // resetForm();
+      
+      // 刷新任务列表
+      console.log('重新获取任务列表...');
+      await fetchUserTasks();
+      
+      // 确保自动刷新已启动
+      if (pendingTasks.value.length > 0 && !autoRefreshInterval.value) {
+        startAutoRefresh();
+      }
+    } else {
+      console.error(`提交失败: ${response?.message || '未知错误'}`, response);
+      showStatusMessage(`提交失败: ${response?.message || '未知错误'}`, 'error');
+    }
+  } catch (error: any) {
+    console.error('表单提交异常:', error);
+    console.error('异常详情:', error.message, error.stack);
+    handleApiError(error);
+    showStatusMessage(`提交出错: ${error?.message || '未知错误'}`, 'error');
+  } finally {
+    submitting.value = false;
+  }
+}
+
+// 页面销毁时清除定时器
+onUnmounted(() => {
+  stopAutoRefresh();
+});
+
+// 格式化错误信息
+function formatErrorMessage(errorMessage: string): string {
+  // 截断过长的错误信息
+  if (errorMessage.length > 200) {
+    return errorMessage.substring(0, 200) + '...';
+  }
+  return errorMessage;
+}
+
+// 在script部分添加批次折叠状态控制
+// 在data声明区域添加
+const batchCollapsedState = ref<Record<string, boolean>>({});
+
+// 添加控制批次折叠的方法
+function toggleBatchCollapse(batchId: string) {
+  if (!batchCollapsedState.value[batchId]) {
+    batchCollapsedState.value[batchId] = true;
+  } else {
+    batchCollapsedState.value[batchId] = !batchCollapsedState.value[batchId];
+  }
+}
+
+// 获取批次是否折叠的方法
+function isBatchCollapsed(batchId: string): boolean {
+  return !!batchCollapsedState.value[batchId];
+}
+
+// 获取批次任务总数和完成数量
+function getBatchCompletionStatus(tasks: Task[]) {
+  if (tasks.length === 0) {
+    return { total: 0, completed: 0, failed: 0, inProgress: 0 };
+  }
+  
+  const completedCount = tasks.filter(t => t.status === 'completed').length;
+  const failedCount = tasks.filter(t => t.status === 'failed').length;
+  const totalCount = tasks.length;
+  
+  return {
+    total: totalCount,
+    completed: completedCount,
+    failed: failedCount,
+    inProgress: totalCount - completedCount - failedCount
+  };
+}
+
+// 获取批次标题
+function getBatchTitle(tasks: Task[]): string {
+  if (tasks.length === 0) return '批量任务';
+  
+  // 获取活动名称
+  const firstTask = tasks[0];
+  if (firstTask.activityId) {
+    const activity = activities.value.find(a => a.id === firstTask.activityId);
+    if (activity) {
+      // 限制活动名称长度，超过10个字显示省略号
+      let activityName = activity.name;
+      if (activityName.length > 10) {
+        activityName = activityName.substring(0, 10) + '...';
+      }
+      return `活动名称: ${activityName}`;
+    }
+  }
+  
+  // 如果没有活动名称，返回空字符串
+  return '';
+}
+
+// 获取批次状态
+function getBatchStatus(tasks: Task[], batchId: string): 'pending' | 'running' | 'completed' | 'failed' | 'mixed' {
+  const batchTasks = tasks.filter(t => t.batchId === batchId);
+  const statuses = new Set(batchTasks.map(t => t.status));
+  
+  if (statuses.size === 1) {
+    return batchTasks[0].status;
+  }
+  
+  // 如果存在失败的任务但不是全部失败
+  if (statuses.has('failed') && statuses.size > 1) {
+    return 'mixed';
+  }
+  
+  // 如果存在进行中的任务
+  if (statuses.has('pending') || statuses.has('running')) {
+    return 'running';
+  }
+  
+  // 如果既有完成的又有其他状态
+  return 'mixed';
+}
+
+// 使用计算属性对任务进行分组
+const getGroupedTasks = (tasksList: Task[]) => {
+  const result: Array<{type: string, id: string, tasks: Task[]}> = [];
+  const batchGroups: Record<string, Task[]> = {};
+  const singleTasks: Task[] = [];
+  
+  // 分组任务
+  tasksList.forEach(task => {
+    if (task.batchId) {
+      if (!batchGroups[task.batchId]) {
+        batchGroups[task.batchId] = [];
+      }
+      batchGroups[task.batchId].push(task);
+    } else {
+      singleTasks.push(task);
+    }
+  });
+  
+  // 将批次任务添加到结果，每个批次作为一个组
+  Object.keys(batchGroups).forEach(batchId => {
+    if (!batchId) return; // 跳过空批次ID
+    
+    result.push({
+      type: 'batch',
+      id: batchId,
+      tasks: batchGroups[batchId].sort((a, b) => (a.batchIndex || 1) - (b.batchIndex || 1))
+    });
+  });
+  
+  // 将单独任务添加到结果
+  singleTasks.forEach(task => {
+    result.push({
+      type: 'single',
+      id: task.id,
+      tasks: [task]
+    });
+  });
+  
+  // 按创建时间排序组（新的在前）
+  result.sort((a, b) => {
+    const aTime = new Date(a.tasks[0].createTime).getTime();
+    const bTime = new Date(b.tasks[0].createTime).getTime();
+    return bTime - aTime;
+  });
+  
+  return result;
+};
+
+// 在二维码相关处理函数中添加新函数
+// 查看活动二维码
+function handleViewActivityQrCode(activityId: string, event?: Event) {
+  // 阻止事件冒泡，避免触发折叠面板
+  if (event) {
+    event.stopPropagation();
+  }
+  
+  if (!activityId) {
+    showStatusMessage('活动ID不存在', 'error');
+    return;
+  }
+  
+  console.log('查看活动笔记二维码:', activityId);
+  
+  // 构建分享链接，包含活动ID
+  const shareLink = encodeURIComponent(`${window.location.origin}/chat#/xhs-auto-api?identifier=${activityId}`);
+  
+  // 使用QR服务生成二维码
+  currentQrUrl.value = `https://xhs.aivip1.top/api/html-render/qrcode?data=${shareLink}`;
+  
+  // 设置当前查看的任务（使用模拟Task对象）
+  currentQrTask.value = {
+    id: 'activity_' + activityId,
+    brandProduct: '活动二维码',
+    title: '扫码查看活动内所有笔记',
+    status: 'completed' as 'pending' | 'running' | 'completed' | 'failed',
+    createTime: new Date().toISOString(),
+    updateTime: new Date().toISOString(),
+    activityId: activityId,
+    result: '',
+    error: '',
+    executeId: undefined,
+    noteId: undefined,
+    batchId: undefined,
+    batchCount: undefined,
+    batchIndex: undefined
+  };
+  
+  // 显示二维码弹窗
+  showQrModal.value = true;
+}
+
+// 添加和删除选题
+function addTitle() {
+  console.log('addTitle函数被调用');
+  const newTitle = productForm.value.title.trim();
+  console.log('当前选题:', newTitle);
+  
+  if (newTitle) {
+    try {
+      // 更新两个选题列表，确保响应式
+      titlesList.value.push(newTitle);
+      productForm.value.titles = [...titlesList.value];
+      
+      // 清空选题输入框
+      productForm.value.title = '';
+      
+      // 调试信息
+      console.log('选题已添加:');
+      console.log('- titlesList.value:', titlesList.value);
+      console.log('- productForm.value.titles:', productForm.value.titles);
+      
+      // 显示消息提示用户添加成功（使用成功状态且短暂显示）
+      showSuccessMessage(`已添加: ${newTitle}`);
+      
+      // 让输入框重新获取焦点，方便连续添加
+      nextTick(() => {
+        const inputElement = document.querySelector('.topic-input') as HTMLInputElement;
+        if (inputElement) inputElement.focus();
+      });
+    } catch (error) {
+      console.error('添加选题出错:', error);
+      showStatusMessage('添加选题失败，请重试', 'error');
+    }
+  } else {
+    console.warn('选题为空，不添加');
+  }
+}
+
+// 开始编辑选题
+function startEdit(index: number) {
+  editingIndex.value = index;
+  editingValue.value = titlesList.value[index];
+  
+  // 等待DOM更新后聚焦到编辑框
+  nextTick(() => {
+    const editInput = document.querySelector('.edit-input-' + index) as HTMLInputElement;
+    if (editInput) {
+      editInput.focus();
+      editInput.select(); // 全选文本方便修改
+    }
+  });
+}
+
+// 保存编辑后的选题
+function saveEdit() {
+  if (editingIndex.value !== null) {
+    const newValue = editingValue.value.trim();
+    if (newValue) {
+      // 保存编辑后的值
+      const oldValue = titlesList.value[editingIndex.value];
+      titlesList.value[editingIndex.value] = newValue;
+      productForm.value.titles = [...titlesList.value];
+      
+      // 显示成功消息
+      showSuccessMessage(`已更新: ${newValue}`);
+      console.log(`选题已编辑: "${oldValue}" -> "${newValue}"`);
+    }
+    // 退出编辑模式
+    editingIndex.value = null;
+  }
+}
+
+// 取消编辑
+function cancelEdit() {
+  editingIndex.value = null;
+}
+
+// 显示简短的成功消息（2秒后自动消失）
+function showSuccessMessage(message: string) {
+  const successToast = document.createElement('div');
+  successToast.className = 'fixed top-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg z-50 animate-fadeIn';
+  successToast.innerHTML = `
+    <div class="flex items-center">
+      <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+      </svg>
+      ${message}
+    </div>
+  `;
+  document.body.appendChild(successToast);
+  
+  // 2秒后移除
+  setTimeout(() => {
+    successToast.classList.add('animate-fadeOut');
+    setTimeout(() => {
+      document.body.removeChild(successToast);
+    }, 300);
+  }, 2000);
+}
+
+function removeTitle(index: number) {
+  console.log(`removeTitle函数被调用，删除索引: ${index}`);
+  
+  try {
+    // 更新两个选题列表，确保响应式
+    const removedTitle = titlesList.value[index];
+    titlesList.value.splice(index, 1);
+    productForm.value.titles = [...titlesList.value];
+    
+    // 退出编辑模式
+    if (editingIndex.value === index) {
+      editingIndex.value = null;
+    }
+    
+    // 调试信息
+    console.log('选题已删除:');
+    console.log('- titlesList.value:', titlesList.value);
+    console.log('- productForm.value.titles:', productForm.value.titles);
+
+    // 显示删除成功消息
+    showSuccessMessage(`已删除: ${removedTitle}`);
+  } catch (error) {
+    console.error('删除选题出错:', error);
+    showStatusMessage('删除选题失败，请重试', 'error');
+  }
+}
+
+// 添加多选题模式标志
+const hasMultiTitles = ref(false);
+
+// 删除文件
+function removeFile(index: number) {
+  if (index >= 0 && index < uploadedFiles.value.length) {
+    uploadedFiles.value.splice(index, 1);
+    productForm.value.materials = uploadedFiles.value
+      .filter(file => file.status === 'success')
+      .map(file => file.fileId);
+  }
+}
+
+// 根据API返回的任务更新本地任务列表
+function updateTaskInList(updatedTask: any) {
+  if (!updatedTask || !updatedTask.id) return;
+  
+  // 在任务列表中查找并更新该任务
+  const index = tasks.value.findIndex(task => task.id === updatedTask.id);
+  if (index !== -1) {
+    const originalTask = tasks.value[index];
+    const originalStatus = originalTask.status;
+    
+    // 确保状态类型符合定义
+    let status: 'pending' | 'running' | 'completed' | 'failed' = originalTask.status;
+    let noteId = originalTask.noteId;
+    let result = originalTask.result;
+    let errorMessage = '';
+    
+    // 从更新的任务数据中提取信息
+    if (updatedTask.status && ['pending', 'running', 'completed', 'failed'].includes(updatedTask.status)) {
+      status = updatedTask.status as 'pending' | 'running' | 'completed' | 'failed';
+    }
+    
+    // 提取noteId
+    if (updatedTask.noteId) {
+      noteId = updatedTask.noteId;
+    } else if (updatedTask.data && typeof updatedTask.data === 'object' && updatedTask.data.noteId) {
+      noteId = updatedTask.data.noteId;
+    }
+    
+    // 提取结果
+    if (updatedTask.data) {
+      result = updatedTask.data;
+    }
+    
+    // 提取错误信息
+    if (status === 'failed') {
+      errorMessage = updatedTask.error || updatedTask.message || '';
+      if (!errorMessage && updatedTask.data && typeof updatedTask.data === 'object') {
+        errorMessage = updatedTask.data.error || '';
+      }
+      if (!errorMessage) {
+        errorMessage = '工作流执行失败';
+      }
+    }
+    
+    // 更新任务
+    const taskToUpdate: Task = {
+      ...originalTask,
+      status,
+      noteId: noteId || originalTask.noteId,
+      result: result || originalTask.result,
+      error: status === 'failed' ? errorMessage : originalTask.error
+    };
+    
+    // 更新任务列表
+    tasks.value.splice(index, 1, taskToUpdate);
+    
+    // 如果任务已完成或失败，从待处理任务列表中移除
+    if (status === 'completed' || status === 'failed') {
+      const pendingIndex = pendingTasks.value.indexOf(updatedTask.id);
+      if (pendingIndex !== -1) {
+        console.log(`任务完成或失败，从待处理列表移除: ${updatedTask.id}`);
+        pendingTasks.value.splice(pendingIndex, 1);
+        
+        // 检查是否需要停止自动刷新
+        if (pendingTasks.value.length === 0) {
+          console.log('没有待处理任务，停止自动刷新');
+          stopAutoRefresh();
+        }
+        
+        // 如果是批量任务且已完成，检查是否需要显示批量提示
+        if (status === 'completed' && originalTask.batchId && (originalTask.batchCount || 0) > 1) {
+          // 查找同批次的其他任务
+          const batchTasks = tasks.value.filter(t => t.batchId === originalTask.batchId);
+          const completedCount = batchTasks.filter(t => t.status === 'completed').length;
+          
+          if (completedCount === originalTask.batchCount) {
+            // 批量任务全部完成
+            showStatusMessage(`批量生成全部完成：${completedCount}/${originalTask.batchCount} 篇笔记已生成`, 'success');
+          } else {
+            // 部分完成
+            showStatusMessage(`批量生成进度：${completedCount}/${originalTask.batchCount} 篇笔记已完成`, 'info');
+          }
+        }
+      }
+      
+      // 显示状态更新消息
+      if (status === 'completed' && originalStatus !== 'completed') {
+        if ((originalTask.batchCount || 0) > 1) {
+          showStatusMessage(`批量任务 "${taskToUpdate.title}" 已完成 (${originalTask.batchIndex}/${originalTask.batchCount})`, 'success');
+        } else {
+          showStatusMessage(`任务 "${taskToUpdate.title}" 已完成，可以查看笔记详情了`, 'success');
+        }
+      } else if (status === 'failed' && originalStatus !== 'failed') {
+        if ((originalTask.batchCount || 0) > 1) {
+          showStatusMessage(`批量任务 "${taskToUpdate.title}" 执行失败 (${originalTask.batchIndex}/${originalTask.batchCount}): ${errorMessage || '工作流执行失败'}`, 'error');
+        } else {
+          showStatusMessage(`任务 "${taskToUpdate.title}" 执行失败: ${errorMessage || '工作流执行失败'}`, 'error');
+        }
+      }
+    } else if (status === 'running' && originalStatus === 'pending') {
+      // 从pending变为running时也通知用户
+      if ((originalTask.batchCount || 0) > 1) {
+        showStatusMessage(`批量任务 "${taskToUpdate.title}" 开始处理 (${originalTask.batchIndex}/${originalTask.batchCount})`, 'info');
+      } else {
+        showStatusMessage(`任务 "${taskToUpdate.title}" 开始处理`, 'info');
+      }
+    }
+  }
+}
+
+// 添加新活动
+async function handleAddActivity() {
+  if (!newActivity.value.name.trim()) {
+    showStatusMessage('活动名称不能为空', 'error');
+    return;
+  }
+  
+  // 检查名称是否重复
+  const isDuplicate = activities.value.some(
+    activity => activity.name === newActivity.value.name.trim()
+  );
+  
+  if (isDuplicate) {
+    showStatusMessage('活动名称已存在，请使用其他名称', 'error');
+    return;
+  }
+  
+  try {
+    // 调用API创建活动
+    const response: any = await createXhsActivityAPI({
+      name: newActivity.value.name.trim(),
+      type: newActivity.value.type,
+      status: newActivity.value.status
+    });
+    
+    if (response && response.code === 200 && response.success) {
+      showStatusMessage('添加活动成功', 'success');
+      
+      // 重新加载活动列表
+      await fetchUserActivities();
+    } else {
+      showStatusMessage('添加活动失败：' + (response?.message || '未知错误'), 'error');
+    }
+  } catch (error: any) {
+    console.error('创建活动失败', error);
+    showStatusMessage('添加活动失败：' + (error?.message || '未知错误'), 'error');
+  }
+  
+  // 重置表单并关闭弹窗
+  newActivity.value = {
+    name: '',
+    type: 'normal',
+    status: 'active'
+  };
+  showAddActivityModal.value = false;
+}
+</script>
+
+<template>
+  <div class="container mx-auto px-4 py-8 max-w-4xl">
+    <!-- 状态消息提示 -->
+    <div v-if="statusMessage" 
+      class="fixed top-4 left-0 right-0 z-50 mx-auto w-full max-w-md px-4 animate-slideIn transition-all duration-300"
+      :class="{
+        'sm:max-w-lg': !isMobile,
+        'px-2 max-w-[95%]': isMobile
+      }"
+    >
+      <div class="rounded-lg shadow-xl p-3 sm:p-4 flex items-center border status-message"
+        :class="{
+          'success': statusType === 'success',
+          'error': statusType === 'error',
+          'info': statusType === 'info',
+          'animate-pulse': statusType === 'error'
+        }"
+      >
+        <div class="flex-shrink-0 mr-2 sm:mr-3">
+          <svg v-if="statusType === 'success'" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+          </svg>
+          <svg v-else-if="statusType === 'error'" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+          </svg>
+          <svg v-else class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+          </svg>
+        </div>
+        <div class="flex-1 mr-2 text-sm sm:text-base break-words">
+          {{ statusMessage }}
+        </div>
+        <button @click="statusMessage = ''; statusType = ''" class="flex-shrink-0 ml-auto">
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+    
+    <!-- 主页面内容 -->
+    <div v-if="showMainPage" class="flex flex-col w-full h-full relative">
+      <!-- 表单部分 -->
+      <div class="bg-white dark:bg-gray-800 shadow-sm rounded-lg p-4 md:p-6 mb-4 border border-gray-200 dark:border-gray-700">
+        <h2 class="text-lg md:text-xl font-bold mb-4 text-gray-800 dark:text-gray-200 flex items-center">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 text-pink-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+          </svg>
+          小红书笔记生成
+        </h2>
+        
+        <form @submit.prevent="submitForm" class="space-y-5">
+          <!-- 活动选择 -->
+          <div class="mb-6">
+            <label class="block text-gray-700 dark:text-gray-300 mb-2 font-medium">
+              活动
+              <span class="text-red-500">*</span>
+            </label>
+            
+            <div class="flex items-center space-x-2">
+              <select
+                v-model="productForm.activityId"
+                class="w-full px-4 py-3 rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all duration-200"
+              >
+                <option value="" disabled>请选择活动</option>
+                <option 
+                  v-for="activity in activities" 
+                  :key="activity.id"
+                  :value="activity.id"
+                >
+                  {{ activity.name }} {{ activity.totalNotes > 0 ? `(已有笔记数：${activity.totalNotes})` : '' }}
+                </option>
+              </select>
+              
+              <!-- 添加活动按钮 -->
+              <button
+                type="button"
+                @click="showAddActivityModal = true"
+                class="flex-shrink-0 flex items-center justify-center px-4 py-3 bg-gradient-to-r from-pink-500 to-pink-600 text-white rounded-md hover:from-pink-600 hover:to-pink-700 transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-offset-2 active:from-pink-700 active:to-pink-800 transform active:scale-95"
+              >
+                <Plus theme="outline" size="18" class="mr-1" />
+                <span>添加</span>
+              </button>
+            </div>
+          </div>
+        
+          <!-- 品牌/产品 -->
+        <div class="mb-6">
+          <label class="block text-gray-700 dark:text-gray-300 mb-2 font-medium">
+              品牌/产品
+            <span class="text-red-500">*</span>
+          </label>
+          <input
+            v-model="productForm.brandProduct"
+            type="text"
+            placeholder="例如: 大三湘山茶油"
+              class="w-full px-4 py-3 rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all duration-200"
+          />
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">输入您要推广的品牌或产品名称</p>
+        </div>
+        
+        <!-- 选题输入 -->
+        <div class="mb-6">
+          <label class="block text-gray-700 dark:text-gray-300 mb-2 font-medium">
+            选题
+            <span class="text-red-500">*</span>
+          </label>
+            <div class="flex flex-col sm:flex-row shadow-sm">
+          <input
+            v-model="productForm.title"
+            type="text"
+            placeholder="例如: 山茶油有什么效果"
+                class="topic-input w-full px-3 py-2 rounded-t-md sm:rounded-l-md sm:rounded-tr-none border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all duration-200"
+                @keyup.enter="addTitle"
+          />
+            <div class="flex">
+              <!-- AI生成按钮 -->
+              <button
+                @click="showAiTopicGenModal = true"
+                type="button"
+                class="flex flex-row items-center justify-center px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 text-white border-y border-r border-blue-600 sm:border-l-0 sm:border-t sm:border-r sm:border-b hover:from-blue-600 hover:to-blue-700 transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 active:from-blue-700 active:to-blue-800 transform active:scale-95"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                <span>AI选题</span>
+              </button>
+              
+              <!-- 原有的添加按钮 -->
+              <button
+                @click="addTitle"
+                type="button"
+                class="flex flex-row items-center justify-center px-4 py-2 bg-gradient-to-r from-pink-500 to-pink-600 text-white rounded-b-md sm:rounded-r-md sm:rounded-bl-none hover:from-pink-600 hover:to-pink-700 transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-offset-2 active:from-pink-700 active:to-pink-800 transform active:scale-95"
+                :disabled="!productForm.title.trim()"
+                :class="{ 'opacity-60 cursor-not-allowed': !productForm.title.trim() }"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                </svg>
+                <span>添加</span>
+              </button>
+            </div>
+            </div>
+            <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+              <span class="flex items-center">
+                <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              提示: 输入选题后按回车键或点击添加按钮，也可以点击AI选题按钮自动生成选题
+              </span>
+            </p>
+        </div>
+        
+          <!-- 选题列表容器 -->
+          <div v-if="titlesList.length > 0" class="mb-6 bg-gray-50/90 dark:bg-gray-800/80 backdrop-blur-sm rounded-lg border border-gray-200/80 dark:border-gray-700/90 shadow-sm overflow-hidden transition-all duration-300 animate-fadeIn">
+            <!-- 选题列表头部 -->
+            <div class="p-3 bg-gray-100/90 dark:bg-gray-750/90 border-b border-gray-200/80 dark:border-gray-700/90">
+              <div class="flex justify-between items-center">
+                <h3 class="text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5 text-pink-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                  </svg>
+                  已添加选题 <span class="inline-flex items-center justify-center w-5 h-5 ml-1 bg-pink-500 text-white text-xs rounded-full">{{ titlesList.length }}</span>
+                </h3>
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  将按顺序依次生成，如选题数小于生成数量将循环使用
+                </p>
+              </div>
+            </div>
+
+            <!-- 选题列表内容 -->
+            <div class="p-3 bg-gray-50/70 dark:bg-gray-800/60">
+              <transition-group name="list" tag="div" class="space-y-2">
+                <div 
+                  v-for="(title, index) in titlesList" 
+                  :key="'title-' + index"
+                  class="group flex items-center justify-between p-2 rounded-md border border-gray-100 dark:border-gray-700 hover:border-pink-200 dark:hover:border-pink-800 hover:bg-pink-50 dark:hover:bg-pink-900/10 transition-all duration-200"
+                >
+                  <!-- 选题序号与内容 -->
+                  <div class="flex items-center flex-1 min-w-0">
+                    <div class="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full mr-2 text-xs font-medium text-white bg-gradient-to-r from-pink-500 to-pink-600">
+                      {{ index + 1 }}
+        </div>
+        
+                    <!-- 编辑模式 -->
+            <input
+                      v-if="editingIndex === index" 
+                      v-model="editingValue" 
+                      :class="'edit-input-' + index"
+                      class="flex-1 min-w-0 px-2 py-1 border border-pink-300 dark:border-pink-700 rounded focus:outline-none focus:ring-2 focus:ring-pink-500 dark:bg-gray-800 dark:text-white"
+                      @keyup.enter="saveEdit"
+                      @keyup.esc="cancelEdit"
+            />
+                    
+                    <!-- 查看模式 -->
+                    <p v-else class="flex-1 min-w-0 text-gray-700 dark:text-gray-300 truncate" :title="title">
+                      {{ title }}
+                    </p>
+                  </div>
+                
+                  <!-- 操作按钮 -->
+                  <div class="flex items-center space-x-1 ml-2">
+                    <!-- 编辑模式按钮 -->
+                    <template v-if="editingIndex === index">
+                      <button 
+                        @click="saveEdit" 
+                        class="text-xs px-2 py-1 text-white bg-green-500 hover:bg-green-600 rounded transition-colors duration-200"
+                        title="保存"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                </svg>
+                      </button>
+                      <button 
+                        @click="cancelEdit" 
+                        class="text-xs px-2 py-1 text-white bg-gray-400 hover:bg-gray-500 rounded transition-colors duration-200"
+                        title="取消"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </template>
+                    
+                    <!-- 查看模式按钮 -->
+                    <template v-else>
+                      <button 
+                        @click="startEdit(index)" 
+                        class="opacity-0 group-hover:opacity-100 text-xs px-2 py-1 text-blue-600 hover:text-blue-700 hover:bg-blue-50 dark:text-blue-400 dark:hover:text-blue-300 dark:hover:bg-blue-900/20 rounded transition-all duration-200"
+                        title="编辑"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                      </button>
+                      <button 
+                        @click.stop.prevent="removeTitle(index)"
+                        class="opacity-0 group-hover:opacity-100 text-xs px-2 py-1 text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-900/20 rounded transition-all duration-200"
+                        title="删除"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </template>
+                  </div>
+                </div>
+              </transition-group>
+              
+              <!-- 选题列表底部 -->
+              <div class="mt-2 text-xs text-gray-500 dark:text-gray-400 flex items-center justify-between px-2">
+                <span class="flex items-center text-pink-500">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  鼠标悬停可查看编辑和删除选项
+                </span>
+                <span>
+                  共 {{ titlesList.length }} 个选题
+                </span>
+            </div>
+          </div>
+        </div>
+        
+          <!-- 上传素材图 -->
+          <div class="mb-6">
+          <label class="block text-gray-700 dark:text-gray-300 mb-2 font-medium">
+              上传素材图
+            <span class="text-red-500">*</span>
+          </label>
+          
+            <div 
+              @click="triggerFileUpload"
+              class="border-2 border-dashed border-pink-300 hover:border-pink-500 dark:border-pink-700 dark:hover:border-pink-500 rounded-lg p-6 text-center cursor-pointer transition-all duration-300 bg-gradient-to-b from-gray-50 to-gray-100 dark:from-gray-800 dark:to-gray-900 shadow-sm hover:shadow-md relative"
+            >
+              <input
+                :id="fileInputId"
+                ref="fileInputRef"
+                type="file"
+                multiple
+                accept="image/*"
+                class="hidden"
+                @change="handleFileUpload"
+              />
+              
+              <!-- 无图片时显示上传提示 -->
+              <div v-if="uploadedFiles.length === 0" class="flex flex-col items-center justify-center space-y-4">
+                <div class="h-16 w-16 rounded-full bg-pink-100 dark:bg-pink-900/30 flex items-center justify-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-pink-500 dark:text-pink-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                </div>
+                <div>
+                  <p class="text-gray-700 dark:text-gray-300 text-base font-medium">
+                    拖拽图片到此处或点击上传
+                  </p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">支持JPG、PNG格式图片，最多10张</p>
+                </div>
+              </div>
+              
+              <!-- 有图片时显示图片网格 -->
+              <div v-else>
+                <div class="flex justify-between items-center mb-4">
+                  <p class="text-sm text-gray-600 dark:text-gray-300 flex items-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                    <span>已上传 {{ fileCount }}/{{ maxFileCount }} 张图片</span>
+                  </p>
+                  <button 
+                    @click.stop="triggerFileUpload" 
+                    class="text-xs text-pink-500 hover:text-pink-600 dark:text-pink-400 dark:hover:text-pink-300 flex items-center"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                    添加更多
+                  </button>
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                  <div 
+                    v-for="(file, index) in uploadedFiles"
+                    :key="index"
+                    class="relative aspect-square group rounded-lg overflow-hidden shadow-sm hover:shadow-md transition-all duration-200"
+                  >
+                    <img 
+                      :src="file.previewUrl" 
+                      class="w-full h-full object-cover rounded-md"
+                      alt="预览图"
+                    />
+                    <button 
+                      @click.stop="removeFile(index)"
+                      class="absolute top-1 right-1 w-6 h-6 flex items-center justify-center rounded-full bg-red-500 text-white opacity-90 hover:opacity-100 transition-opacity"
+                      title="删除"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                    <div
+                      v-if="file.status === 'uploading'"
+                      class="absolute inset-0 flex items-center justify-center bg-black bg-opacity-30 rounded-md"
+                    >
+                      <div class="h-8 w-8 border-3 border-t-pink-500 rounded-full animate-spin"></div>
+                    </div>
+                    <div
+                      v-if="file.status === 'error'"
+                      class="absolute inset-0 flex items-center justify-center bg-red-500 bg-opacity-40 rounded-md"
+                    >
+                      <span class="text-white text-xs font-medium px-2 py-1 bg-red-600 rounded">上传失败</span>
+                    </div>
+                    <div
+                      v-if="file.status === 'success'"
+                      class="absolute bottom-0 left-0 right-0 bg-green-500 bg-opacity-40 text-white text-xs font-medium py-1 text-center"
+                    >
+                      <span class="opacity-70">已上传</span>
+                    </div>
+                  </div>
+                </div>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-3 text-center">点击此区域可继续添加更多图片</p>
+              </div>
+            </div>
+            
+             
+              </div>
+            
+          <!-- 批量生成设置 -->
+          <div class="mb-6">
+            <label class="block text-gray-700 dark:text-gray-300 mb-2 font-medium">
+              批量生成设置
+            </label>
+            
+            <div class="flex items-center">
+              <span class="text-sm text-gray-600 dark:text-gray-400 mr-2">生成数量:</span>
+              <input 
+                v-model="productForm.batchCount" 
+                type="number"
+                min="1"
+                max="10"
+                class="px-3 py-2 rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all duration-200 w-24"
+              />
+              <span class="ml-2 text-xs text-gray-500 dark:text-gray-400 flex items-center">
+                <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                设置批量生成文章的数量
+              </span>
+            </div>
+          </div>
+          
+          <!-- 提交按钮 -->
+          <div class="mt-8 flex flex-col sm:flex-row sm:justify-between items-center space-y-3 sm:space-y-0">
+            <button
+              type="submit"
+              class="w-full sm:w-auto sm:min-w-[180px] px-6 py-3 bg-gradient-to-r from-pink-500 to-pink-600 text-white rounded-md hover:from-pink-600 hover:to-pink-700 transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-offset-2 active:from-pink-700 active:to-pink-800 transform active:scale-95 flex items-center justify-center"
+              :disabled="submitting"
+            >
+              <span v-if="!submitting" class="flex items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
+                {{ Number(productForm.batchCount) > 1 ? `批量生成${productForm.batchCount}篇笔记` : '生成笔记' }}
+              </span>
+              <span v-else class="flex items-center">
+                <svg class="animate-spin -ml-1 mr-2 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                处理中...
+              </span>
+            </button>
+            
+            <button
+              type="button"
+              @click="resetForm"
+              class="w-full sm:w-auto px-6 py-3 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-700 transform active:scale-95 flex items-center justify-center"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              重置表单
+            </button>
+          </div>
+        </form>
+          
+          <!-- 任务结果列表 -->
+          <div class="mt-10 pt-6 border-t border-gray-200 dark:border-gray-700">
+            <div class="flex justify-between items-center mb-4">
+              <h2 class="text-lg font-medium text-gray-800 dark:text-gray-200">生成结果</h2>
+              <button 
+                @click="fetchUserTasks" 
+                class="flex items-center text-sm px-3 py-1 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-md transition-colors"
+                :disabled="loadingTasks"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                <span v-if="loadingTasks">刷新中...</span>
+                <span v-else>刷新列表</span>
+              </button>
+            </div>
+            
+            <!-- 加载中显示 -->
+            <div v-if="loadingTasks" class="text-center py-12 border rounded-lg bg-gray-50 dark:bg-gray-800">
+              <div class="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-pink-500 mx-auto mb-4"></div>
+              <p class="text-gray-600 dark:text-gray-300">正在加载任务列表...</p>
+              <p class="text-gray-500 dark:text-gray-400 text-xs mt-2">首次加载可能需要较长时间</p>
+            </div>
+            
+            <!-- 空列表提示 -->
+            <div v-else-if="tasks.length === 0" class="text-center py-12 border rounded-lg bg-gray-50 dark:bg-gray-800">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 mx-auto text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+              <p class="text-gray-600 dark:text-gray-300 font-medium mb-2">暂无生成结果</p>
+              <p class="text-gray-500 dark:text-gray-400 text-sm">填写上方表单并点击"生成"按钮开始创建笔记</p>
+            </div>
+            
+            <!-- 任务列表 -->
+            <div v-else class="task-items space-y-4">
+              <!-- 使用计算属性对任务进行分组 -->
+              <template v-for="(group, groupIndex) in getGroupedTasks(tasks)" :key="groupIndex">
+                
+                <!-- 批量任务组 -->
+                <div v-if="group.type === 'batch'" :key="'batch-' + group.id" 
+                     class="batch-group border border-purple-200 dark:border-purple-800 rounded-lg overflow-hidden mb-4">
+                  
+                  <!-- 批次标题行 -->
+                  <div @click="toggleBatchCollapse(group.id)" 
+                     class="batch-header flex flex-col sm:flex-row sm:justify-between sm:items-center p-4 bg-purple-50 dark:bg-purple-900/30 cursor-pointer hover:bg-purple-100 dark:hover:bg-purple-800/40 transition-colors">
+                  <div class="flex items-center mb-2 sm:mb-0">
+                      <svg xmlns="http://www.w3.org/2000/svg" 
+                           :class="{'transform rotate-90': !isBatchCollapsed(group.id)}"
+                           class="h-5 w-5 mr-2 text-purple-600 dark:text-purple-400 transition-transform duration-200" 
+                           viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+                      </svg>
+                      <div>
+                        <h3 class="font-bold text-purple-800 dark:text-purple-200">
+                          {{ group.tasks[0].brandProduct }}
+                        </h3>
+                        <div class="flex items-center">
+                        <p v-if="getBatchTitle(group.tasks)" class="text-sm text-gray-600 dark:text-gray-400 truncate max-w-xs sm:max-w-md">
+                            {{ getBatchTitle(group.tasks) }}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <!-- 批次状态指示器 -->
+                  <div class="flex flex-wrap gap-2 items-center">
+                      <!-- 批次进度 -->
+                    <div class="mr-2">
+                        <div class="flex items-center text-xs">
+                          <span class="text-green-600 dark:text-green-400 font-medium mr-1">{{ getBatchCompletionStatus(group.tasks).completed }}</span>
+                          <span class="text-gray-500 dark:text-gray-400">/</span>
+                          <span class="text-gray-600 dark:text-gray-400 ml-1">{{ getBatchCompletionStatus(group.tasks).total }}</span>
+                          <span class="ml-1 text-gray-500 dark:text-gray-400">完成</span>
+                        </div>
+                        
+                        <!-- 进度条 -->
+                      <div class="w-20 sm:w-24 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 mt-1">
+                          <div class="bg-green-500 h-1.5 rounded-full" 
+                               :style="{width: `${(getBatchCompletionStatus(group.tasks).completed / getBatchCompletionStatus(group.tasks).total) * 100}%`}">
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <!-- 批次状态标签 -->
+                      <span
+                        :class="{
+                          'bg-yellow-400 dark:bg-yellow-600': getBatchStatus(group.tasks, group.id) === 'pending',
+                          'bg-blue-500 dark:bg-blue-600': getBatchStatus(group.tasks, group.id) === 'running',
+                          'bg-green-500 dark:bg-green-600': getBatchStatus(group.tasks, group.id) === 'completed',
+                          'bg-red-500 dark:bg-red-600': getBatchStatus(group.tasks, group.id) === 'failed',
+                          'bg-purple-500 dark:bg-purple-600': getBatchStatus(group.tasks, group.id) === 'mixed'
+                        }"
+                        class="text-white text-xs px-2 py-1 rounded-full"
+                      >
+                        {{ 
+                          getBatchStatus(group.tasks, group.id) === 'pending' ? '等待处理' : 
+                          getBatchStatus(group.tasks, group.id) === 'running' ? '处理中' :
+                          getBatchStatus(group.tasks, group.id) === 'completed' ? '已完成' :
+                          getBatchStatus(group.tasks, group.id) === 'failed' ? '失败' :
+                          getBatchStatus(group.tasks, group.id) === 'mixed' ? '部分完成' : '未知'
+                        }}
+                      </span>
+                      
+                    <!-- 活动操作按钮 -->
+                      <button
+                        v-if="group.tasks[0].activityId"
+                        @click="handleViewActivity(group.tasks[0].activityId)"
+                      class="text-xs px-2 py-1 bg-purple-500 text-white rounded-md hover:bg-purple-600 transition-all duration-200 flex items-center"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                        </svg>
+                      活动
+                      </button>
+
+                      <!-- 活动二维码按钮 -->
+                      <button
+                        v-if="group.tasks[0].activityId"
+                        @click="handleViewActivityQrCode(group.tasks[0].activityId, $event)" 
+                      class="text-sm font-medium px-3 py-1 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-all duration-200 flex items-center"
+                      >
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                        </svg>
+                      活动二维码
+                      </button>
+                      <!-- <button 
+                        v-if="group.tasks[0].activityId"
+                        @click="handleViewActivityQrCode(group.tasks[0].activityId, $event)" 
+                      class="text-gray-400 hover:text-blue-500 transition-colors p-1 rounded-full hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                        title="查看活动笔记二维码"
+                      >
+                        <ScanCode theme="outline" size="20" />
+                      </button> -->
+                    </div>
+                  </div>
+                  
+                  <!-- 批次任务内容（可折叠） -->
+                  <div v-if="!isBatchCollapsed(group.id)" class="batch-content divide-y divide-gray-100 dark:divide-gray-800">
+                    <div
+                      v-for="task in group.tasks"
+                      :key="task.id"
+                      class="task-item p-3 transition-all duration-200 hover:bg-gray-50 dark:hover:bg-gray-800/50"
+                    >
+                    <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center">
+                      <div class="flex items-center flex-grow mb-2 sm:mb-0">
+                          <p class="text-sm text-gray-600 dark:text-gray-400 mr-2 flex-shrink">
+                            {{ task.title }}
+                          </p>
+                          <span
+                            :class="{
+                              'bg-yellow-400 dark:bg-yellow-600': task.status === 'pending',
+                              'bg-blue-500 dark:bg-blue-600': task.status === 'running',
+                              'bg-green-500 dark:bg-green-600': task.status === 'completed',
+                              'bg-red-500 dark:bg-red-600': task.status === 'failed'
+                            }"
+                            class="text-white text-xs px-2 py-0.5 rounded-full whitespace-nowrap ml-2"
+                          >
+                            {{ 
+                              task.status === 'pending' ? '等待处理' : 
+                              task.status === 'running' ? '处理中' :
+                              task.status === 'completed' ? '已完成' :
+                              task.status === 'failed' ? '失败' : '未知'
+                            }}
+                          </span>
+                        </div>
+                        
+                      <div class="task-actions flex flex-wrap gap-2">
+                          <button
+                            v-if="task.status === 'pending' || task.status === 'running'"
+                            @click="refreshTaskStatus(task.id)"
+                          class="text-sm font-medium px-3 py-1 bg-gray-200 dark:bg-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-300 dark:hover:bg-gray-600"
+                          >
+                            刷新
+                          </button>
+                          
+                          <!-- 已完成任务的操作按钮组 -->
+                          <template v-if="task.status === 'completed'">
+                            <!-- <button
+                              v-if="task.result"
+                              @click="handleViewQrCode(task)"
+                            class="text-sm font-medium px-3 py-1 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-all duration-200 flex items-center"
+                            >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                              </svg>
+                            二维码
+                            </button> -->
+                            
+                            <button
+                              v-if="task.result"
+                            @click="handleViewNoteDetail(task)"
+                            class="text-sm font-medium px-3 py-1 bg-green-500 text-white rounded-md hover:bg-green-600 transition-all duration-200 flex items-center"
+                              title="查看笔记详情"
+                            >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                              </svg>
+                            详情
+                            </button>
+                          </template>
+                          
+                          <!-- 失败任务的错误信息 -->
+                        <p v-else-if="task.status === 'failed'" class="text-sm font-medium text-red-500 truncate max-w-full sm:max-w-xs">
+                            {{ formatErrorMessage(task.error || '处理失败') }}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <!-- 单个任务 -->
+                <div
+                  v-else
+                  :key="'single-' + group.id"
+                  class="task-item border hover:border-pink-300 rounded-lg p-3 transition-all duration-200 hover:shadow-md"
+                >
+                <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center">
+                  <div class="flex items-center flex-grow mb-2 sm:mb-0">
+                      <div class="mr-2">
+                        <h3 class="font-bold text-sm">{{ group.tasks[0].brandProduct }}</h3>
+                        <p class="text-xs text-gray-600 dark:text-gray-400">
+                          {{ group.tasks[0].title }}
+                        </p>
+                      </div>
+                      <span
+                        :class="{
+                          'bg-yellow-400 dark:bg-yellow-600': group.tasks[0].status === 'pending',
+                          'bg-blue-500 dark:bg-blue-600': group.tasks[0].status === 'running',
+                          'bg-green-500 dark:bg-green-600': group.tasks[0].status === 'completed',
+                          'bg-red-500 dark:bg-red-600': group.tasks[0].status === 'failed'
+                        }"
+                        class="text-white text-xs px-2 py-0.5 rounded-full whitespace-nowrap ml-2"
+                      >
+                        {{ 
+                          group.tasks[0].status === 'pending' ? '等待处理' : 
+                          group.tasks[0].status === 'running' ? '处理中' :
+                          group.tasks[0].status === 'completed' ? '已完成' :
+                          group.tasks[0].status === 'failed' ? '失败' : '未知'
+                        }}
+                      </span>
+                    </div>
+                    
+                  <div class="task-actions flex flex-wrap gap-2">
+                      <button
+                        v-if="group.tasks[0].status === 'pending' || group.tasks[0].status === 'running'"
+                        @click="refreshTaskStatus(group.tasks[0].id)"
+                      class="text-sm font-medium px-3 py-1 bg-gray-200 dark:bg-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-300 dark:hover:bg-gray-600"
+                      >
+                        刷新
+                      </button>
+                      
+                      <!-- 已完成任务的操作按钮组 -->
+                      <template v-if="group.tasks[0].status === 'completed'">
+                        <button
+                          @click="handleViewQrCode(group.tasks[0])"
+                        class="text-sm font-medium px-3 py-1 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-all duration-200 flex items-center"
+                        >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                          </svg>
+                        二维码
+                        </button>
+                        
+                        <button
+                          v-if="group.tasks[0].activityId"
+                          @click="handleViewActivity(group.tasks[0].activityId)"
+                        class="text-sm font-medium px-3 py-1 bg-purple-500 text-white rounded-md hover:bg-purple-600 transition-all duration-200 flex items-center"
+                        >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                          </svg>
+                        活动
+                        </button>
+
+                        <button
+                          v-if="group.tasks[0].result"
+                        @click="handleViewNoteDetail(group.tasks[0])"
+                        class="text-sm font-medium px-3 py-1 bg-green-500 text-white rounded-md hover:bg-green-600 transition-all duration-200 flex items-center"
+                          title="查看笔记详情"
+                        >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                          </svg>
+                        详情
+                        </button>
+                      </template>
+                      
+                    <p v-else-if="group.tasks[0].status === 'failed'" class="text-sm font-medium text-red-500 truncate max-w-full sm:max-w-xs">
+                        {{ formatErrorMessage(group.tasks[0].error || '处理失败') }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- 二维码弹窗 -->
+      <div v-if="showQrModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-75 backdrop-blur-sm">
+      <div class="bg-white dark:bg-gray-800 rounded-xl p-4 sm:p-6 max-w-md w-full shadow-2xl transform transition-all duration-300 scale-100">
+          <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-bold text-gray-800 dark:text-gray-200 flex items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 text-pink-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+              </svg>
+              扫码查看
+            </h3>
+            <button 
+              @click="closeQrModal" 
+              class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          
+          <div v-if="currentQrTask" class="text-center">
+          <p class="mb-3 text-gray-600 dark:text-gray-300 text-sm">{{ currentQrTask.title }}</p>
+            
+            <!-- 添加批量任务标识 -->
+            <div v-if="currentQrTask.batchId && (currentQrTask.batchCount || 0) > 1" class="mb-3">
+              <span class="px-2 py-1 bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-200 rounded-full text-xs font-medium">
+                批量任务 {{ currentQrTask.batchIndex }}/{{ currentQrTask.batchCount }}
+              </span>
+            </div>
+            
+          <div class="bg-white p-3 rounded-lg inline-block mb-3">
+            <img :src="currentQrUrl" alt="二维码" class="w-48 h-48 max-w-full" />
+            </div>
+            
+          <p class="text-sm text-gray-500 dark:text-gray-400">使用手机扫描二维码查看笔记</p>
+          
+          <div class="mt-4 flex flex-col sm:flex-row gap-2 justify-center">
+            <button 
+              v-if="currentQrTask.result" 
+              @click="handleViewNoteDetail(currentQrTask)" 
+              class="w-full px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600 transition-all duration-200 flex items-center justify-center"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+              </svg>
+              查看笔记详情
+            </button>
+            
+              <button 
+                @click="closeQrModal" 
+              class="w-full px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 transition-all duration-200"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 笔记详情弹窗 -->
+    <div v-if="showNoteDetailModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-70 backdrop-blur-sm">
+      <div class="w-[700px] h-[800px] max-w-[90vw] max-h-[90vh] flex flex-col bg-gray-900 rounded-lg overflow-hidden">
+        <!-- 头部栏 -->
+        <div class="flex justify-between items-center p-4 bg-gray-800 bg-opacity-80 backdrop-blur-sm border-b border-gray-700">
+          <h3 class="text-lg font-bold text-white flex items-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 text-pink-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+              </svg>
+              笔记详情
+          </h3>
+          <div class="flex space-x-2">
+              <button 
+                @click="closeNoteDetailModal" 
+              class="p-2 text-white hover:text-gray-300 transition-colors rounded-full hover:bg-gray-700"
+              title="关闭"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+          </div>
+        </div>
+        
+        <!-- 内容区域 -->
+        <div class="flex-grow relative overflow-hidden">
+          <!-- 加载状态 -->
+          <div v-if="noteDetailLoading" class="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-70 z-10">
+            <div class="flex flex-col items-center">
+              <div class="h-10 w-10 border-4 border-t-pink-500 rounded-full animate-spin mb-4"></div>
+              <p class="text-white">笔记加载中...</p>
+            </div>
+          </div>
+          
+          <!-- 错误状态 -->
+          <div v-else-if="noteDetailError" class="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-70 z-10">
+            <div class="text-center p-4 rounded-lg bg-gray-800 max-w-md">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-red-500 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <p class="text-white mb-4">{{ noteDetailError }}</p>
+              <button 
+                @click="closeNoteDetailModal" 
+                class="px-4 py-2 bg-gray-700 text-white rounded-md hover:bg-gray-600 transition-all duration-200"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+          
+          <!-- iframe内容 -->
+            <iframe 
+          v-if="currentNoteId" 
+              :src="currentNoteId" 
+          class="w-full h-full border-none" 
+              @load="handleIframeLoaded"
+              @error="handleIframeError"
+            ></iframe>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- AI选题生成弹窗 -->
+  <AiTopicGenModal
+    v-model:visible="showAiTopicGenModal"
+    @generate="handleAiGeneratedTopic"
+    @generateMultiple="handleAiGeneratedTopics"
+  />
+
+  <!-- 添加活动弹窗 -->
+  <div v-if="showAddActivityModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm">
+    <div class="w-[500px] max-w-[90vw] flex flex-col bg-white dark:bg-gray-800 rounded-lg overflow-hidden shadow-xl">
+      <!-- 头部栏 -->
+      <div class="flex justify-between items-center p-4 border-b border-gray-200 dark:border-gray-700">
+        <h3 class="text-lg font-bold text-gray-800 dark:text-gray-200 flex items-center">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 text-pink-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+          </svg>
+          添加活动
+        </h3>
+        <button 
+          @click="showAddActivityModal = false" 
+          class="p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 transition-colors rounded-full hover:bg-gray-100 dark:hover:bg-gray-700"
+          title="关闭"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      
+      <!-- 内容区域 -->
+      <div class="p-6">
+        <form @submit.prevent="handleAddActivity" class="space-y-4">
+          <div>
+            <label class="block text-gray-700 dark:text-gray-300 mb-2 text-sm font-medium">
+              活动名称
+              <span class="text-red-500">*</span>
+            </label>
+            <input
+              v-model="newActivity.name"
+              type="text"
+              placeholder="例如: 新产品发布会"
+              class="w-full px-4 py-2 rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all duration-200"
+            />
+          </div>
+          <div class="flex space-x-4">
+            <div class="flex-1">
+              <label class="block text-gray-700 dark:text-gray-300 mb-2 text-sm font-medium">
+                活动类型
+              </label>
+              <select
+                v-model="newActivity.type"
+                class="w-full px-4 py-2 rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all duration-200"
+              >
+                <option value="normal">日常使用</option>
+                <option value="special">特殊活动</option>
+              </select>
+            </div>
+            <div class="flex-1">
+              <label class="block text-gray-700 dark:text-gray-300 mb-2 text-sm font-medium">
+                活动状态
+              </label>
+              <select
+                v-model="newActivity.status"
+                class="w-full px-4 py-2 rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all duration-200"
+              >
+                <option value="active">进行中</option>
+                <option value="inactive">已结束</option>
+              </select>
+            </div>
+          </div>
+          <div class="flex justify-end space-x-3 pt-4">
+            <button
+              type="button"
+              @click="showAddActivityModal = false"
+              class="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 transition-all duration-200"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              class="px-4 py-2 bg-gradient-to-r from-pink-500 to-pink-600 text-white rounded-md hover:from-pink-600 hover:to-pink-700 transition-all duration-200"
+            >
+              确认添加
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+input:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(236, 72, 153, 0.3);
+}
+
+.container {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* 小红书风格弹窗 - 通用样式 */
+.modal-container {
+  background-color: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+}
+
+.modal-content {
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  max-width: 600px;
+}
+
+/* 笔记详情弹窗专用样式 */
+.notes-modal-container {
+  background-color: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(4px);
+}
+
+.notes-modal-content {
+  background: #1a1a1a;
+  color: white;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  width: 100%;
+  max-width: 600px;
+  padding: 4px; /* 减小内边距 */
+}
+
+.h-90vh {
+  height: 90vh;
+}
+
+/* iframe容器样式 */
+.note-detail-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 8px;
+  background-color: #1a1a1a; /* 确保iframe背景也是黑色 */
+}
+
+/* 添加状态消息动画 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideInFromTop {
+  0% {
+    transform: translateY(-20px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(255, 255, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+.animate-slideIn {
+  animation: slideInFromTop 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.animate-pulse {
+  animation: pulse 2s infinite;
+}
+
+/* 小红书风格表单输入 */
+input, select {
+  transition: all 0.2s ease;
+}
+
+input:focus, select:focus {
+  border-color: #ec4899 !important;
+  box-shadow: 0 0 0 2px rgba(236, 72, 153, 0.2) !important;
+}
+
+/* 任务状态标签动画 */
+.task-status span {
+  transition: all 0.3s;
+}
+
+.task-item:hover .task-status span {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* 批量任务组样式 */
+.batch-group {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  transition: all 0.3s ease;
+}
+
+.batch-group:hover {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+}
+
+.batch-header {
+  user-select: none;
+}
+
+/* 批次折叠动画 */
+.batch-content-enter-active,
+.batch-content-leave-active {
+  transition: all 0.3s ease;
+  max-height: 1000px;
+  overflow: hidden;
+}
+
+.batch-content-enter-from,
+.batch-content-leave-to {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+
+/* 状态标签高亮效果 */
+.task-status span {
+  transition: all 0.2s ease;
+}
+
+.task-status span:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.list-enter-active,
+.list-leave-active {
+  transition: all 0.5s ease;
+}
+.list-enter-from {
+  opacity: 0;
+  transform: translateY(30px);
+}
+.list-leave-to {
+  opacity: 0;
+  transform: translateX(30px);
+}
+.animate-fadeIn {
+  animation: fadeIn 0.5s ease-out;
+}
+.animate-fadeOut {
+  animation: fadeOut 0.3s ease-out forwards;
+}
+@keyframes fadeIn {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes fadeOut {
+  0% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+
+/* 输入框动画 */
+.topic-input:focus {
+  border-color: #ec4899;
+  box-shadow: 0 0 0 2px rgba(236, 72, 153, 0.2);
+}
+
+/* 添加按钮悬浮效果 */
+button:not(:disabled):hover svg {
+  transform: rotate(90deg);
+  transition: transform 0.3s ease;
+}
+
+/* 列表项动画 */
+.group:hover {
+  transform: translateY(-2px);
+}
+
+/* 添加选题卡片的悬浮效果 */
+.group {
+  position: relative;
+}
+
+.group::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -8px;
+  height: 8px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.05), transparent);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  border-radius: 0 0 8px 8px;
+}
+
+.group:hover::after {
+  opacity: 1;
+}
+
+/* 强调分隔线 */
+.divide-line {
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(236, 72, 153, 0.2), transparent);
+  margin: 12px 0;
+}
+
+/* 状态消息动画 */
+.status-message-enter-active,
+.status-message-leave-active {
+  transition: all 0.3s ease;
+}
+.status-message-enter-from,
+.status-message-leave-to {
+  transform: translateY(-20px);
+  opacity: 0;
+}
+
+/* 列表动画 */
+.list-enter-active,
+.list-leave-active {
+  transition: all 0.3s ease;
+}
+.list-enter-from {
+  opacity: 0;
+  transform: translateY(30px);
+}
+.list-leave-to {
+  opacity: 0;
+  transform: translateY(-30px);
+}
+
+/* 笔记详情弹窗专用样式 */
+.note-detail-modal {
+  height: 100vh;
+  width: 100vw;
+}
+
+/* 移动端响应式调整 */
+@media (max-width: 640px) {
+  .activity-selector {
+    padding: 0.5rem;
+  }
+  
+  .task-item {
+    padding: 0.75rem;
+  }
+  
+  .task-actions {
+    margin-top: 0.5rem;
+  }
+}
+
+/* 状态消息容器样式 */
+.status-message {
+  transition: all 0.3s ease;
+}
+
+.status-message.success {
+  background-color: rgba(16, 185, 129, 0.95);
+  border-color: rgba(5, 150, 105, 0.8);
+}
+
+.status-message.error {
+  background-color: rgba(239, 68, 68, 0.95);
+  border-color: rgba(220, 38, 38, 0.8);
+}
+
+.status-message.info {
+  background-color: rgba(59, 130, 246, 0.95);
+  border-color: rgba(37, 99, 235, 0.8);
+}
+</style> 

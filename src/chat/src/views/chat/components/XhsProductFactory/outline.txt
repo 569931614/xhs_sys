@@ -1,0 +1,44 @@
+主组件 MainComponent.vue 实现大纲
+
+一、导入部分
+- 导入Vue组件、工具函数和API
+- 导入子组件：
+  - FileUploader.vue
+  - TopicManager.vue 
+  - TaskItem.vue
+  - TaskBatchGroup.vue
+  - TaskList.vue
+  - ModalDialogs.vue
+- 导入样式文件
+
+二、状态定义部分
+- 表单数据: productForm
+- 选题列表: titlesList 
+- 上传文件列表: uploadedFiles
+- 任务列表: tasks
+- 活动列表: activities
+- 状态消息: statusMessage, statusType
+- 加载状态: loadingActivities, loadingTasks, submitting
+- 弹窗状态: showQrModal, currentQrUrl, currentQrTask, showNoteDetailModal, etc.
+- 自动刷新相关: autoRefreshInterval, pendingTasks
+
+三、方法部分
+- 加载数据方法: fetchUserActivities, fetchUserTasks
+- 表单操作方法: submitForm, resetForm
+- 文件上传相关事件处理
+- 选题管理相关事件处理
+- 任务管理相关: refreshTaskStatus, startAutoRefresh, stopAutoRefresh
+- 弹窗相关: handleViewQrCode, handleViewNoteDetail, closeQrModal, etc.
+- 状态消息相关: showStatusMessage
+
+四、生命周期钩子
+- onMounted: 初始加载数据
+- onUnmounted: 清理资源(定时器等)
+
+五、模板部分
+- 表单区域 (使用 TopicManager 和 FileUploader 组件)
+- 任务列表区域 (使用 TaskList 组件)
+- 弹窗区域 (使用 ModalDialogs 组件)
+
+六、样式引用
+- 引用主样式文件

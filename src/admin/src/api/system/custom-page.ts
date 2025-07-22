@@ -1,0 +1,46 @@
+import request from '@/api';
+
+export interface CustomPage {
+  id?: number;
+  title: string;
+  path: string;
+  type: number;
+  icon: string;
+  description: string;
+  order: number;
+  status: number;
+  userTypes?: number[]; // 允许访问的用户类型ID数组
+  createTime?: string;
+  updateTime?: string;
+}
+
+interface ListResponse {
+  list: CustomPage[];
+  total: number;
+}
+
+interface ApiResponse {
+  code: number;
+  message: string;
+  data: ListResponse;
+}
+
+export const getCustomPageList = (params?: any) => {
+  return request.get<ApiResponse>('/customPage/list', { params });
+};
+
+export const getCustomPage = (id: number) => {
+  return request.get<CustomPage>(`/customPage/${id}`);
+};
+
+export const createCustomPage = (data: CustomPage) => {
+  return request.post<CustomPage>('/customPage', data);
+};
+
+export const updateCustomPage = (id: number, data: CustomPage) => {
+  return request.put<CustomPage>(`/customPage/${id}`, data);
+};
+
+export const deleteCustomPage = (id: number) => {
+  return request.delete(`/customPage/${id}`);
+}; 
