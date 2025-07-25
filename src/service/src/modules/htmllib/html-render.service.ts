@@ -1095,6 +1095,115 @@ export class HtmlRenderService {
     }
   }
 
+  /**
+   * 将SVG转换为图片并上传到Super图床
+   * @param svgContent SVG内容字符串
+   * @param options 转换选项
+   * @returns 图片信息和Super图床URL
+   */
+  async svgToImage(svgContent: string, options?: {
+    width?: number;
+    height?: number;
+    quality?: number;
+    type?: 'jpeg' | 'png';
+    uploadToSuperbed?: boolean;
+    devicePixelRatio?: number;
+  }): Promise<{ filePath: string; fileName: string; url: string; superImageUrl?: string }> {
+    try {
+      this.logger.log('开始将SVG转换为图片');
+
+      // 设置默认值
+      const imageType = options?.type || 'png';
+      const imageQuality = options?.quality || 80;
+      const uploadToSuperbed = options?.uploadToSuperbed !== false; // 默认上传到super图床
+      const devicePixelRatio = options?.devicePixelRatio || 1;
+
+      // 创建唯一的文件名
+      const hash = crypto.createHash('md5').update(svgContent + Date.now().toString()).digest('hex');
+      const fileName = `svg_${hash}.${imageType}`;
+      const outputPath = path.join(this.imageOutputDir, fileName);
+
+      // 解析SVG以获取尺寸信息
+      const $ = cheerio.load(svgContent, { xmlMode: true });
+      const svgElement = $('svg').first();
+
+      let svgWidth = options?.width;
+      let svgHeight = options?.height;
+
+      // 如果没有指定尺寸，尝试从SVG中提取
+      if (!svgWidth || !svgHeight) {
+        const widthAttr = svgElement.attr('width');
+        const heightAttr = svgElement.attr('height');
+        const viewBoxAttr = svgElement.attr('viewBox');
+
+        if (widthAttr && heightAttr) {
+          svgWidth = svgWidth || parseInt(widthAttr.replace(/[^\d]/g, ''), 10) || 800;
+          svgHeight = svgHeight || parseInt(heightAttr.replace(/[^\d]/g, ''), 10) || 600;
+        } else if (viewBoxAttr) {
+          const viewBoxValues = viewBoxAttr.split(/\s+|,/);
+          if (viewBoxValues.length >= 4) {
+            svgWidth = svgWidth || parseInt(viewBoxValues[2], 10) || 800;
+            svgHeight = svgHeight || parseInt(viewBoxValues[3], 10) || 600;
+          }
+        }
+
+        // 如果仍然没有尺寸，使用默认值
+        svgWidth = svgWidth || 800;
+        svgHeight = svgHeight || 600;
+      }
+
+      // 应用设备像素比
+      const actualWidth = Math.round(svgWidth * devicePixelRatio);
+      const actualHeight = Math.round(svgHeight * devicePixelRatio);
+
+      this.logger.log(`SVG尺寸: ${svgWidth}x${svgHeight}, 实际输出尺寸: ${actualWidth}x${actualHeight} (像素比: ${devicePixelRatio})`);
+
+      // 创建包含SVG的HTML
+      const htmlContent = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <style>
+            body {
+              margin: 0;
+              padding: 0;
+              width: ${svgWidth}px;
+              height: ${svgHeight}px;
+              overflow: hidden;
+            }
+            svg {
+              width: 100%;
+              height: 100%;
+              display: block;
+            }
+          </style>
+        </head>
+        <body>
+          ${svgContent}
+        </body>
+        </html>
+      `;
+
+      // 使用现有的htmlToImage方法转换
+      const result = await this.htmlToImage(htmlContent, {
+        width: actualWidth,
+        height: actualHeight,
+        quality: imageQuality,
+        type: imageType,
+        uploadToSuperbed: uploadToSuperbed,
+        useAutoWidth: false // 使用指定尺寸
+      });
+
+      this.logger.log(`SVG成功转换为图片: ${result.url}`);
+
+      return result;
+    } catch (error) {
+      this.logger.error(`SVG转图片失败: ${error.message}`, error.stack);
+      throw new HttpException(`SVG转图片失败: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
   async createRenderTask(renderParams: any): Promise<RenderTask> {
     // 生成唯一的任务ID
     const taskId = uuidv4();

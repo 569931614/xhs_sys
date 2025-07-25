@@ -185,4 +185,44 @@ export class HtmlRenderDto {
   @ValidateNested()
   @Type(() => ImageOptions)
   imageOptions?: ImageOptions;
-} 
+}
+
+export class SvgToImageDto {
+  @ApiProperty({
+    example: '<svg width="100" height="100"><circle cx="50" cy="50" r="40" stroke="black" stroke-width="3" fill="red" /></svg>',
+    description: 'SVG内容字符串'
+  })
+  @IsNotEmpty({ message: 'SVG内容不能为空' })
+  @IsString({ message: 'SVG内容必须是字符串' })
+  svgContent: string;
+
+  @ApiProperty({ example: 800, description: '输出图片宽度（像素）', required: false })
+  @IsOptional()
+  @IsNumber({}, { message: '宽度必须是数字' })
+  width?: number;
+
+  @ApiProperty({ example: 600, description: '输出图片高度（像素）', required: false })
+  @IsOptional()
+  @IsNumber({}, { message: '高度必须是数字' })
+  height?: number;
+
+  @ApiProperty({ example: 80, description: '图片质量(1-100)', required: false })
+  @IsOptional()
+  @IsNumber({}, { message: '质量必须是数字' })
+  quality?: number;
+
+  @ApiProperty({ example: 'png', description: '图片类型', enum: ['jpeg', 'png'], required: false })
+  @IsOptional()
+  @IsEnum(['jpeg', 'png'], { message: '图片类型必须是jpeg或png' })
+  type?: 'jpeg' | 'png';
+
+  @ApiProperty({ example: true, description: '是否上传到Super图床', required: false, default: true })
+  @IsOptional()
+  @IsBoolean({ message: 'uploadToSuperbed必须是布尔值' })
+  uploadToSuperbed?: boolean;
+
+  @ApiProperty({ example: 2, description: '设备像素比，用于高清显示', required: false, default: 1 })
+  @IsOptional()
+  @IsNumber({}, { message: '设备像素比必须是数字' })
+  devicePixelRatio?: number;
+}

@@ -1,7 +1,7 @@
 import { Body, Controller, Post, HttpException, HttpStatus, Header, Res, Get, Param, Delete, Query, Logger } from '@nestjs/common';
 import { ApiOperation, ApiTags, ApiResponse, ApiParam, ApiQuery, ApiBody } from '@nestjs/swagger';
 import { HtmlRenderService } from './html-render.service';
-import { HtmlRenderDto, TextReplacementItem } from './dto/htmllib-render.dto';
+import { HtmlRenderDto, TextReplacementItem, SvgToImageDto } from './dto/htmllib-render.dto';
 import { Public } from '../../decorators/public.decorator';
 import { Response } from 'express';
 import { RenderTemplateToImageDto } from './renderTemplateToImage.dto';
@@ -703,4 +703,102 @@ export class HtmlRenderController {
       }
     }
   }
-} 
+
+  @ApiOperation({ summary: '将SVG转换为图片并上传到Super图床' })
+  @ApiResponse({
+    status: 200,
+    description: 'SVG转换成功',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean', example: true },
+        message: { type: 'string', example: 'SVG转换成功' },
+        data: {
+          type: 'object',
+          properties: {
+            fileName: { type: 'string', example: 'svg_abc123.png' },
+            url: { type: 'string', example: '/uploads/html-images/svg_abc123.png' },
+            superImageUrl: { type: 'string', example: 'https://pic1.superbed.cn/abc123.png' },
+            width: { type: 'number', example: 800 },
+            height: { type: 'number', example: 600 }
+          }
+        }
+      }
+    }
+  })
+  @ApiResponse({ status: 400, description: '参数错误' })
+  @ApiResponse({ status: 500, description: '服务器内部错误' })
+  @ApiBody({
+    type: SvgToImageDto,
+    description: 'SVG转图片参数',
+    examples: {
+      simple: {
+        summary: '简单SVG示例',
+        value: {
+          svgContent: '<svg width="100" height="100"><circle cx="50" cy="50" r="40" stroke="black" stroke-width="3" fill="red" /></svg>',
+          width: 800,
+          height: 600,
+          type: 'png',
+          quality: 80,
+          uploadToSuperbed: true
+        }
+      },
+      complex: {
+        summary: '复杂SVG示例',
+        value: {
+          svgContent: '<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><rect x="10" y="10" width="180" height="180" fill="lightblue" stroke="navy" stroke-width="2"/><text x="100" y="100" text-anchor="middle" font-family="Arial" font-size="16" fill="navy">Hello SVG</text></svg>',
+          width: 1200,
+          height: 1200,
+          type: 'png',
+          quality: 90,
+          uploadToSuperbed: true,
+          devicePixelRatio: 2
+        }
+      }
+    }
+  })
+  @Post('svg-to-image')
+  async svgToImage(@Body() svgDto: SvgToImageDto) {
+    try {
+      this.logger.log(`接收到SVG转图片请求，SVG长度: ${svgDto.svgContent.length}`);
+
+      // 验证SVG内容
+      if (!svgDto.svgContent.trim().toLowerCase().includes('<svg')) {
+        throw new HttpException('无效的SVG内容，必须包含<svg>标签', HttpStatus.BAD_REQUEST);
+      }
+
+      const result = await this.htmlRenderService.svgToImage(svgDto.svgContent, {
+        width: svgDto.width,
+        height: svgDto.height,
+        quality: svgDto.quality,
+        type: svgDto.type,
+        uploadToSuperbed: svgDto.uploadToSuperbed,
+        devicePixelRatio: svgDto.devicePixelRatio
+      });
+
+      this.logger.log(`SVG转图片成功: ${result.superImageUrl || result.url}`);
+
+      return {
+        success: true,
+        message: 'SVG转换成功',
+        data: {
+          fileName: result.fileName,
+          url: result.url,
+          superImageUrl: result.superImageUrl,
+          localPath: result.filePath
+        }
+      };
+    } catch (error) {
+      this.logger.error(`SVG转图片失败: ${error.message}`);
+
+      const statusCode = error instanceof HttpException
+        ? error.getStatus()
+        : HttpStatus.INTERNAL_SERVER_ERROR;
+
+      throw new HttpException({
+        success: false,
+        message: error.message || 'SVG转图片失败'
+      }, statusCode);
+    }
+  }
+}
